@@ -1,0 +1,12 @@
+env*
+inputs/
+outputs/
+others/
+.ipynb_checkpoints/*
+.env
+demo/inputs/
+demo/outputs/
+demo/.ipynb_checkpoints/*
+demo2/
+demo/assets/.ipynb_checkpoints/*
+venv*
