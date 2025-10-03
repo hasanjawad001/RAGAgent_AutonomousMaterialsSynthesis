@@ -15,6 +15,10 @@ import pycountry
 from langchain.vectorstores.faiss import FAISS
 from langchain.docstore.in_memory import InMemoryDocstore
 from langchain.docstore.document import Document
+import pandas as pd
+import io
+import base64
+import mimetypes
 
 ##
 def extract_text_from_pdf(path):
@@ -103,6 +107,7 @@ def chunk_text(text, max_tokens=None, tokenizer=None):
     return chunks
 
 def chunk_text2(text, max_tokens=None, tokenizer=None, overlap=None):
+    # this enables overlapping to retrieve coherent contexts
     if max_tokens is None:
         max_tokens = TOKENS_PER_CHUNK
     if tokenizer is None:
@@ -134,7 +139,116 @@ def estimate_embedding_cost(token_count, model="text-embedding-3-small"):
         "text-embedding-ada-002": 0.10,
     }.get(model, 0.02) # price per 1 000 000 tokens
     return (token_count / 1000000) * price_per_million
-    
+
+################################
+## Additional Context
+################################
+
+def _to_data_url(file_bytes, mime_type="image/png"):
+    ## convert bytes -> data URL for multimodal image input
+    b64 = base64.b64encode(file_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{b64}"
+
+def _parse_table_file(file_bytes, filename, max_rows=50, max_chars=20000):
+    ## compact text extraction
+    ## for tabular keep (e.g. max 50 rows and 20k chars)
+    try:
+        if filename.lower().endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(file_bytes))
+        else:  # .xlsx
+            df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
+    except Exception as e:
+        return f"[PARSE-ERROR {filename}: {e}]"
+    buf = []
+    buf.append(f"TABLE: {filename}")
+    buf.append("COLUMNS: " + ", ".join(map(str, df.columns.tolist())))
+    head = df.head(max_rows)
+    buf.append("HEAD:")
+    buf.append(head.to_csv(index=False))
+    text = "\n".join(buf)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n...[truncated]..."
+    return text
+
+def build_upload_bundle(uploaded_files, client, embedding_model, dimension): ## (client, embedding_model, dimension) = (st.session_state.client, st.session_state.embedding_model, st.session_state.dimension or d_em2dim[st.session_state.embedding_model] )
+    ## build an in-memory FAISS for uploaded *text-like* files and collect images
+    text_chunks = []
+    text_meta = []
+    images = []  # list of {"name": str, "data_url": str}
+
+    for uf in uploaded_files:
+        name = uf.name
+        mime = uf.type or mimetypes.guess_type(name)[0] or ""
+        data = uf.getvalue()  # bytes (safe to call once)
+        ## images e.g. plots
+        if name.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff")):
+            data_url = _to_data_url(data, mime or "image/png")
+            images.append({"name": name, "data_url": data_url})
+            continue
+        ## text-like docs
+        text = ""
+        if name.lower().endswith(".pdf"):
+            try:
+                with fitz.open(stream=data, filetype="pdf") as doc:
+                    text = "\n".join(page.get_text() for page in doc)
+            except Exception as e:
+                st.warning(f"⚠️ Could not read PDF {name}: {e}")
+                continue
+        elif name.lower().endswith(".txt"):
+            text = data.decode("utf-8", errors="ignore")
+        elif name.lower().endswith(".csv") or name.lower().endswith(".xlsx"):
+            text = _parse_table_file(data, name)
+        else:
+            st.warning(f"⚠️ Unsupported file type: {name} (supported: pdf/txt/csv/xlsx + images)")
+            continue
+        ##
+        text = remove_junk_sections(text)
+        text = remove_junk_lines(text)
+        chunks = chunk_text2(
+            text, max_tokens=TOKENS_PER_CHUNK, tokenizer=enc, overlap=WORDS_PER_CHUNK_OVERLAP
+        )
+        for i, ch in enumerate(chunks):
+            text_chunks.append(ch)
+            text_meta.append({
+                "source": f"uploaded/{name}",
+                "chunk_id": i,
+                "text": ch,
+                "embedding_model": embedding_model
+            })
+
+    # build FAISS for uploaded text info
+    upload_db = None
+    if text_chunks:
+        BATCH = 64
+        embs = []
+        for i in range(0, len(text_chunks), BATCH):
+            batch = text_chunks[i:i+BATCH]
+            resp = client.embeddings.create(input=batch, model=embedding_model)
+            embs.extend([d.embedding for d in resp.data])
+
+        emb_mat = np.array(embs, dtype="float32")
+        index = faiss.IndexFlatL2(dimension)
+        index.add(emb_mat)
+
+        ids = [str(i) for i in range(len(text_meta))]
+        docs_dict = {
+            ids[i]: Document(
+                page_content=text_meta[i]["text"],
+                metadata={"source": text_meta[i]["source"], "chunk_id": text_meta[i]["chunk_id"]}
+            ) for i in range(len(text_meta))
+        }
+        docstore = InMemoryDocstore(docs_dict)
+        index_to_docstore_id = {i: ids[i] for i in range(len(ids))}
+
+        upload_db = FAISS(
+            embedding_function=lambda _: [],  # search-by-vector only
+            index=index,
+            docstore=docstore,
+            index_to_docstore_id=index_to_docstore_id,
+        )
+
+    return upload_db, text_meta, images
+
 ## 
 ## remove 
 # input_dir = "inputs"
@@ -382,13 +496,56 @@ with st.expander("🎛️ Advanced Controls: Diversity & Creativity"):
     else:
         temperature = 0.3
     
-if "index" in st.session_state:
-    query = st.text_area("Ask your question here:", height=300)    
+if "index" in st.session_state:   
+    ##
+    query = st.text_area("Ask your question here:", height=280, placeholder="Type your question...")
+
+    ##
+    st.markdown("#### 📎 Add any relevant file(s) for this question (optional)")
+    uploaded_files = st.file_uploader(
+        "Upload text files (PDFs/TXT/CSV/XLSX) or plots/images (PNG/JPG/JPEG/GIF/BIMP/TIF/TIFF) or both types:",
+        type=["pdf", "txt", "csv", "xlsx", "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff"],
+        accept_multiple_files=True
+    )
+    use_uploads = True ## st.checkbox("Use uploaded files when answering", value=True)    
+    
+    ##
+    ##
     if st.button("💬 Answer") and query:
+        ## 1. process uploads once and cache in session_state
+        if uploaded_files:
+            try:
+                up_db, up_meta, up_images = build_upload_bundle(
+                    uploaded_files=uploaded_files,
+                    client=client,
+                    embedding_model=st.session_state.embedding_model,
+                    dimension=d_em2dim[st.session_state.embedding_model]
+                )
+                st.session_state.upload_db = up_db
+                st.session_state.upload_meta = up_meta
+                st.session_state.upload_images = up_images
+                n_text = len(up_meta)
+                n_imgs = len(up_images)
+                st.success(f"✅ Processed {n_text} text chunks and {n_imgs} image(s).")
+            except Exception as e:
+                st.error(f"❌ Upload processing failed: {e}")
+        else:
+            # clear previous uploads so they don’t leak into new queries
+            st.session_state.upload_db = None
+            st.session_state.upload_meta = []
+            st.session_state.upload_images = []                
+
+        ## 2. optional - quick status
+        if use_uploads and "upload_meta" in st.session_state:
+            st.caption(f"Uploads ready: {len(st.session_state.get('upload_meta', []))} text chunks, "
+                       f"{len(st.session_state.get('upload_images', []))} images.")
+
+        ## 3.
         query_embedding = client.embeddings.create(
             input=query,
             model=st.session_state.embedding_model
         ).data[0].embedding
+        ## start from here --------------
         query_embedding = np.array(query_embedding, dtype="float32").reshape(1, -1)
         ## plain vector base index search
         # D, I = st.session_state.index.search(query_embedding, k=top_k)
@@ -405,11 +562,35 @@ if "index" in st.session_state:
             fetch_k=1000,    # or whatever raw window you want, reranking will be applied on that
             lambda_mult=1.0 - diversity  # your chosen trade‐off (0 more diverse, 1 less diverse)
         )
-        # build context from the returned Documents
+
+        # --- Retrieve from UPLOADS (text-like)
+        results_up = []
+        if use_uploads and "upload_db" in st.session_state and st.session_state.upload_db is not None:
+            results_up = st.session_state.upload_db.max_marginal_relevance_search_by_vector(
+                embedding=flat_emb,
+                k=top_k,
+                fetch_k=1000,
+                lambda_mult=1.0 - diversity
+            )
+
+        # --- Merge: half KB, half uploads (tweak as desired)
+        merged = []
+        if results_up:
+            n_main = min(len(results), int(0.5 * top_k))
+            merged.extend(results[:n_main])
+            merged.extend(results_up[:top_k - n_main])
+        else:
+            merged = results[:top_k]
+
+        # --- Build context block
         context_meta_chunks = [
             f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.page_content}"
-            for doc in results
+            for doc in merged
         ]
+        # add uploaded images as "sources"
+        if use_uploads and "upload_images" in st.session_state and st.session_state.upload_images:
+            for img in st.session_state.upload_images[:]:
+                context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")
         ##
         context_meta = "\n\n".join(context_meta_chunks)
         prompt = f"""
@@ -421,32 +602,67 @@ User query: {query}
 
 Answer:
 """
-        system_instructions = "You are an expert scientific research assistant. Use the context provided from research papers to answer the user query as accurately as possible. You provide detailed responses using as much of the provided context as possible, giving background information when needed to support your response. If the answer is not clearly found in the context, respond with: 'The context does not provide enough information to answer this question.' If the provided context is not enough to answer the user, use web search to find revelent information.At the end of your answer, also mention the source file name(s) where the answer came from, as listed in the context before each chunk (e.g., [DL-rheed-harris-SI.pdf | chunk 1]) or with citations of paper you found online."
-        if st.session_state.gpt_model=="o4-mini-deep-research-2025-06-26":
+
+        # --- Attach uploaded images if model supports images
+        supports_images = st.session_state.gpt_model in ["gpt-4o-2024-08-06", "gpt-4.1-2025-04-14"]
+        user_content = [{"type": "text", "text": prompt}]
+        if use_uploads and "upload_images" in st.session_state and st.session_state.upload_images:
+            if supports_images:
+                for img in st.session_state.upload_images[:]:  # cap for token sanity e.g considering max 5 images
+                    user_content.append({"type": "text", "text": f"[uploaded/{img['name']} | image]:"})
+                    user_content.append({"type": "image_url", "image_url": {"url": img["data_url"]}})                                        
+            else:
+                st.info("Uploaded images will be ignored by the selected model. Choose gpt-4o or gpt-4.1 to include images.")
+
+        # --- System instructions (unchanged)
+        system_instructions = (
+            "You are an expert scientific research assistant. Use the context provided from research papers to answer the user query as accurately as possible. "
+            "You provide detailed responses using as much of the provided context as possible, giving background information when needed to support your response. "
+            "If the answer is not clearly found in the context, respond with: 'The context does not provide enough information to answer this question.' "
+            "If the provided context is not enough to answer the user, use web search to find revelent information."
+            "At the end of your answer, also mention the source file names where the answer came from, as shown in the context before each chunk "
+            "(e.g., [DL-rheed-harris-SI.pdf | chunk 1]) or the source image names where the answer came from "
+            "(e.g., [uploaded/image.png | image]: (image attached)), or include citations of paper you found online."
+        )
+
+        # --- Call model (images only sent for 4o/4.1)
+        if st.session_state.gpt_model == "o4-mini-deep-research-2025-06-26":
             response = client.responses.create(
-                model=st.session_state.gpt_model,         # e.g. "o4-mini-deep-research-2025-06-26"
+                model=st.session_state.gpt_model,
                 instructions=system_instructions,
-                tools=[{ "type": "web_search_preview" }],
-                input=prompt,
+                tools=[{"type": "web_search_preview"}],
+                input=prompt,  # text only
             )
             answer_text = response.output_text
-        elif st.session_state.gpt_model=="o4-mini-2025-04-16":
-            response = client.chat.completions.create(
-              model=st.session_state.gpt_model,
-              messages=[{"role":"system","content": system_instructions}, {"role": "user", "content": prompt}],
-            )
-            answer_text = response.choices[0].message.content
-        else:
+
+        elif st.session_state.gpt_model in ["gpt-4o-2024-08-06", "gpt-4.1-2025-04-14"]:
             response = client.chat.completions.create(
                 model=st.session_state.gpt_model,
-                messages=[{"role":"system","content": system_instructions}, {"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": system_instructions},
+                    {"role": "user", "content": user_content},
+                ],
                 temperature=temperature,
             )
             answer_text = response.choices[0].message.content
+
+        else:  # o4-mini-2025-04-16 (text only)
+            response = client.chat.completions.create(
+                model=st.session_state.gpt_model,
+                messages=[
+                    {"role": "system", "content": system_instructions},
+                    {"role": "user", "content": prompt},  # plain text
+                ],
+            )
+            answer_text = response.choices[0].message.content
+
+        # --- Render
         st.markdown("### 💡 Answer")
         st.write(answer_text.strip())
+
         with st.expander("📚 Retrieved Context for this Query"):
             context_meta_html = context_meta.replace("\n", "<br>")
             st.markdown(f"<div style='overflow-wrap: break-word; width: 600px'>{context_meta_html}</div>", unsafe_allow_html=True)
+
 else:
     st.info("⚠️ Please build or load a knowledge base before asking a question.")
