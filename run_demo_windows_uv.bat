@@ -18,7 +18,7 @@ if errorlevel 1 (
 
 REM === Set up virtual environment ===
 if not exist .venv (
-    uv venv
+    uv venv --python 3.12
 )
 call venv\Scripts\activate.bat
 
