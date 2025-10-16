@@ -40,9 +40,8 @@ The system enables researchers to:
 .
 ├── app.py                     # Main application (UI + RAG pipeline)
 ├── requirements.txt           # Dependencies
-├── run_demo_linux.sh          # Linux launch script
+├── run_demo_unix.sh           # Linux/MacOS launch script
 ├── run_demo_windows.bat       # Windows launch script
-├── run_demo_windows_uv.bat    # Windows script with 'uv' package manager (Recommended)
 ├── inputs/                    # Example folder for input PDFs
 ├── outputs/                   # Example folder for knowledge base index/metadata
 ├── assets/                    # Images (Demo)
@@ -55,29 +54,23 @@ The system enables researchers to:
 
 > ✅ **Recommended Python version: 3.10+**
 
-### 🐧 Linux Users  
+### 🐧 Linux/MacOS Users  
 
 1. Make the script executable:  
    ```bash
-   chmod +x run_demo_linux.sh
+   chmod +x run_demo_unix.sh
    ```
 2. Run the demo:  
    ```bash
-   ./run_demo_linux.sh
+   ./run_demo_unix.sh
    ```
 
 ### 🪟 Windows Users  
 
-#### Without 'uv' Package Manager  
+#### Uses 'uv' Package Manager (Recommended)  
 Simply double-click:  
 ```bash
 run_demo_windows.bat
-```
-
-#### With 'uv' Package Manager (Recommended)  
-Simply double-click:  
-```bash
-run_demo_windows_uv.bat
 ```
 
 ---
