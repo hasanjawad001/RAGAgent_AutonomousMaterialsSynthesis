@@ -1,5 +1,6 @@
 @echo off
 setlocal
+set "UV_NATIVE_TLS=true"
 set UV_LINK_MODE=copy
 
 REM === Check if uv is installed ===

@@ -1,4 +1,6 @@
 #!/bin/bash
+# Make uv use the OS trust store (fixes TLS behind enterprise proxies)
+export UV_NATIVE_TLS=true
 
 # === Ensure ~/.local/bin is in PATH ===
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
