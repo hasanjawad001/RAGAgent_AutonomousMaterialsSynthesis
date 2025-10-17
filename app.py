@@ -25,6 +25,14 @@ import mimetypes
 # Helpers 
 ################################
 
+def dequote_path(p: str) -> str:
+    if not p:
+        return p
+    p = p.strip()
+    if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'":
+        p = p[1:-1]
+    return p
+
 def extract_text_from_pdf(path):
     doc = fitz.open(path)
     return "\n".join(page.get_text() for page in doc)
@@ -315,21 +323,21 @@ if option == "📥 Build a new knowledge base":
         help="This model is used for generating embeddings → impacts context matching"
     )
     st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
-    st.session_state.pdf_folder = st.text_input(
+    st.session_state.pdf_folder = dequote_path(st.text_input(
         "📁 Input Folder path for PDFs:",
         value='inputs/content/pdfs/temp',
         help="Path to get the PDFs as input to build the knowledge base"
-    )
-    st.session_state.knowledge_base_name = st.text_input(
+    ))
+    st.session_state.knowledge_base_name = dequote_path(st.text_input(
         "🧠 Output FAISS index file path (.index)",
         value='outputs/Test_knowledgebase.index',
         help="Path to save the FAISS index"
-    )
-    st.session_state.metadata_name = st.text_input(
+    ))
+    st.session_state.metadata_name = dequote_path(st.text_input(
         "📝 Output metadata file path (.pkl)",
         value='outputs/chunk_metadata.pkl',
         help="Path to save metadata for chunks"
-    )
+    ))
     if st.button("📚 Build Knowledge Base"):
         if not os.path.isdir(st.session_state.pdf_folder):
             st.error("The provided folder path does not exist.")
