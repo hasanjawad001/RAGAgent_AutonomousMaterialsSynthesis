@@ -15,13 +15,13 @@ import pycountry
 from langchain_community.vectorstores import FAISS 
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 import pandas as pd
 import io
 import base64
 import mimetypes
 from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers import EnsembleRetriever
+from langchain.retrievers import EnsembleRetriever, MultiQueryRetriever
 
 ################################
 # Helpers 
@@ -575,9 +575,9 @@ if "index" in st.session_state:
             model=st.session_state.embedding_model
         ).data[0].embedding
         query_embedding = np.array(query_embedding, dtype="float32").reshape(1, -1)
-
+        flat_emb = query_embedding[0].astype(float).tolist()
+        
         ##
-        # flat_emb = query_embedding[0].astype(float).tolist()
         # results = st.session_state.db.max_marginal_relevance_search_by_vector(
         #     embedding=flat_emb, k=top_k_textKBfaiss, fetch_k=top_k_textKBfaiss * 2, lambda_mult=1.0 - diversity
         # )
@@ -594,8 +594,17 @@ if "index" in st.session_state:
         bm25 = st.session_state.bm25
         # Hybrid: FAISS (semantic) + BM25 (keywords) fused via EnsembleRetriever (RRF under the hood)
         hybrid = EnsembleRetriever(retrievers=[vs_retriever, bm25])
-        # Get the merged results as Documents
-        results = hybrid.invoke(query)
+        # Use a lightweight LLM to generate query paraphrases
+        llm_expander = ChatOpenAI(model="gpt-4o-mini")
+        # Wrap your hybrid retriever
+        multi_query = MultiQueryRetriever.from_llm(
+            retriever=hybrid,
+            llm=llm_expander,
+            include_original=True,
+        )        
+        # Retrieve expanded results
+        # results = hybrid.invoke(query)        
+        results = multi_query.invoke(query)        
         ##
         results_up = []
         if use_uploads and st.session_state.get("upload_db") is not None:
