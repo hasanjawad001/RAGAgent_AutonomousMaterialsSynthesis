@@ -20,6 +20,8 @@ import pandas as pd
 import io
 import base64
 import mimetypes
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever
 
 ################################
 # Helpers 
@@ -269,8 +271,9 @@ d_em2dim = {
 }
 TOKENS_PER_CHUNK = 300
 WORDS_PER_CHUNK_OVERLAP = int(TOKENS_PER_CHUNK / 10)  # ~10%
-top_k_textKB = 10
-top_k_addKB = 10
+top_k_textKBfaiss = 50
+top_k_textKBbm = 50
+top_k_addKBfaiss = 25
 
 ################################
 # App UI
@@ -433,6 +436,12 @@ if option == "📥 Build a new knowledge base":
             index_to_docstore_id=index_to_docstore_id,
         )
         st.session_state.db = db
+        ##
+        # === NEW: keep a list of Documents and build BM25 over them ===
+        all_documents = list(docstore._dict.values())  # each value is a LangChain Document
+        st.session_state.all_documents = all_documents
+        st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
+        ##
 
 else:  # Load existing
     index_path = st.text_input("🧠 Index file path (.index)", value='outputs/Test_knowledgebase.index')
@@ -465,8 +474,13 @@ else:  # Load existing
                 docstore=docstore,
                 index_to_docstore_id=index_to_docstore_id,
             )
-
             st.session_state.db = db
+            ##
+            # === NEW: same as above for loaded KB ===
+            all_documents = list(docstore._dict.values())
+            st.session_state.all_documents = all_documents
+            st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
+            ##
             st.session_state.embedding_model = metadata[0].get("embedding_model", "text-embedding-3-small")
             st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
             st.session_state.index = index
@@ -562,29 +576,41 @@ if "index" in st.session_state:
         ).data[0].embedding
         query_embedding = np.array(query_embedding, dtype="float32").reshape(1, -1)
 
-        flat_emb = query_embedding[0].astype(float).tolist()
-        results = st.session_state.db.max_marginal_relevance_search_by_vector(
-            embedding=flat_emb, k=top_k_textKB, fetch_k=top_k_textKB * 10, lambda_mult=1.0 - diversity
+        ##
+        # flat_emb = query_embedding[0].astype(float).tolist()
+        # results = st.session_state.db.max_marginal_relevance_search_by_vector(
+        #     embedding=flat_emb, k=top_k_textKBfaiss, fetch_k=top_k_textKBfaiss * 2, lambda_mult=1.0 - diversity
+        # )
+        # Build a FAISS retriever that still does MMR (so we keep your diversity dial)
+        vs_retriever = st.session_state.db.as_retriever(
+            search_type="mmr",
+            search_kwargs={
+                "k": top_k_textKBfaiss,
+                "fetch_k": top_k_textKBfaiss * 2,
+                "lambda_mult": 1.0 - diversity,
+            },
         )
-
+        # BM25 retriever we prepared after building/loading the KB
+        bm25 = st.session_state.bm25
+        # Hybrid: FAISS (semantic) + BM25 (keywords) fused via EnsembleRetriever (RRF under the hood)
+        hybrid = EnsembleRetriever(retrievers=[vs_retriever, bm25])
+        # Get the merged results as Documents
+        results = hybrid.invoke(query)
+        ##
         results_up = []
         if use_uploads and st.session_state.get("upload_db") is not None:
             results_up = st.session_state.upload_db.max_marginal_relevance_search_by_vector(
-                embedding=flat_emb, k=top_k_addKB, fetch_k=top_k_addKB * 10, lambda_mult=1.0 - diversity
+                embedding=flat_emb, k=top_k_addKBfaiss, fetch_k=top_k_addKBfaiss * 2, lambda_mult=1.0 - diversity
             )
 
-        merged = []
+        merged = results[:int((top_k_textKBfaiss+top_k_textKBbm)/10)]        
         if results_up:
-            merged.extend(results[:top_k_textKB])
-            merged.extend(results_up[:top_k_addKB])
-        else:
-            merged = results[:top_k_textKB]
+            merged.extend(results_up[:int(top_k_addKBfaiss/5)])
 
         context_meta_chunks = [
             f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.page_content}"
             for doc in merged
-        ]
-
+        ]        
         if use_uploads and st.session_state.get("upload_images"):
             for img in st.session_state.upload_images[:]:
                 context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")

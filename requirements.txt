@@ -12,3 +12,4 @@ langchain-core==0.3.68
 langchain-community==0.3.27
 langchain-text-splitters==0.3.8
 langchain-openai==0.3.7
+rank-bm25==0.2.2
