@@ -22,6 +22,11 @@ import base64
 import mimetypes
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever, MultiQueryRetriever
+from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import LLMChainExtractor
+from langchain.retrievers.document_compressors import CrossEncoderReranker
+# from sentence_transformers import CrossEncoder
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 
 ################################
 # Helpers 
@@ -497,10 +502,10 @@ st.header("❓ Ask a Question")
 st.session_state.gpt_model = st.selectbox(
     "🤖 Select model:",
     options=[
+        "gpt-4o-2024-08-06",        
         "gpt-5",
         "gpt-5-thinking",
         "gpt-5-pro",
-        "gpt-4o-2024-08-06",
         "gpt-4.1-2025-04-14",
         "o4-mini-2025-04-16",
         "o4-mini-deep-research-2025-06-26",
@@ -578,10 +583,10 @@ if "index" in st.session_state:
         flat_emb = query_embedding[0].astype(float).tolist()
         
         ##
+        ##
         # results = st.session_state.db.max_marginal_relevance_search_by_vector(
         #     embedding=flat_emb, k=top_k_textKBfaiss, fetch_k=top_k_textKBfaiss * 2, lambda_mult=1.0 - diversity
         # )
-        # Build a FAISS retriever that still does MMR (so we keep your diversity dial)
         vs_retriever = st.session_state.db.as_retriever(
             search_type="mmr",
             search_kwargs={
@@ -590,21 +595,28 @@ if "index" in st.session_state:
                 "lambda_mult": 1.0 - diversity,
             },
         )
-        # BM25 retriever we prepared after building/loading the KB
         bm25 = st.session_state.bm25
-        # Hybrid: FAISS (semantic) + BM25 (keywords) fused via EnsembleRetriever (RRF under the hood)
         hybrid = EnsembleRetriever(retrievers=[vs_retriever, bm25])
-        # Use a lightweight LLM to generate query paraphrases
         llm_expander = ChatOpenAI(model="gpt-4o-mini")
-        # Wrap your hybrid retriever
         multi_query = MultiQueryRetriever.from_llm(
             retriever=hybrid,
             llm=llm_expander,
             include_original=True,
+        ) 
+        cross_encoder = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
+        reranker = CrossEncoderReranker(model=cross_encoder)        
+        reranked_exapanded = ContextualCompressionRetriever(
+            base_retriever=multi_query,
+            base_compressor=reranker,
         )        
-        # Retrieve expanded results
-        # results = hybrid.invoke(query)        
-        results = multi_query.invoke(query)        
+        compressor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  
+        compressor = LLMChainExtractor.from_llm(compressor_llm)    
+        compressed_retriever = ContextualCompressionRetriever(
+            base_retriever=reranked_exapanded,
+            base_compressor=compressor,
+        )        
+        results = compressed_retriever.invoke(query)
+        ##
         ##
         results_up = []
         if use_uploads and st.session_state.get("upload_db") is not None:
