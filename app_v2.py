@@ -275,7 +275,7 @@ d_em2dim = {
     "text-embedding-3-large": 3072
 }
 TOKENS_PER_CHUNK = 300
-WORDS_PER_CHUNK_OVERLAP = int(TOKENS_PER_CHUNK / 10)  # ~10%
+WORDS_PER_CHUNK_OVERLAP = int(TOKENS_PER_CHUNK / 5)  # ~10%
 top_k_textKBfaiss = 50
 top_k_textKBbm = 50
 top_k_addKBfaiss = 25
