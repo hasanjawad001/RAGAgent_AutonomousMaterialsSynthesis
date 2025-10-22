@@ -25,8 +25,8 @@ from langchain.retrievers import EnsembleRetriever, MultiQueryRetriever
 from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import LLMChainExtractor
 from langchain.retrievers.document_compressors import CrossEncoderReranker
-# from sentence_transformers import CrossEncoder
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+from langchain_community.document_transformers import LongContextReorder
 
 ################################
 # Helpers 
@@ -616,6 +616,8 @@ if "index" in st.session_state:
             base_compressor=compressor,
         )        
         results = compressed_retriever.invoke(query)
+        reorder = LongContextReorder()
+        results = reorder.transform_documents(results)        
         ##
         ##
         results_up = []
