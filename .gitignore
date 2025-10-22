@@ -11,3 +11,4 @@ demo/.ipynb_checkpoints/*
 demo2/
 demo/assets/.ipynb_checkpoints/*
 venv*
+__pycache__/
