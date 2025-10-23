@@ -490,6 +490,7 @@ if option == "📥 Build a new knowledge base":
 else:  # Load existing
     index_path = st.text_input("🧠 Index file path (.index)", value='outputs/Test_knowledgebase.index')
     meta_path = st.text_input("📝 Metadata file path (.pkl)", value='outputs/chunk_metadata.pkl')
+    graph_path = st.text_input("🕸️ Knowledge Graph file path (.pkl)", value='outputs/knowledge_graph.pkl')    
     if st.button("📂 Load Knowledge Base"):
         if not os.path.isfile(index_path):
             st.error("Index file not found.")
@@ -500,7 +501,7 @@ else:  # Load existing
         try:
             index = faiss.read_index(index_path)
             with open(meta_path, "rb") as f:
-                metadata = pickle.load(f)
+                metadata = pickle.load(f)                
 
             ids = [str(i) for i in range(len(metadata))]
             docs_dict = {
@@ -524,6 +525,17 @@ else:  # Load existing
             all_documents = list(docstore._dict.values())
             st.session_state.all_documents = all_documents
             st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
+            ##
+            ##
+            if os.path.isfile(graph_path):
+                try:
+                    with open(graph_path, "rb") as f:
+                        st.session_state.graph = pickle.load(f)
+                    st.success(f"✅ Knowledge graph loaded!")
+                except Exception as e:
+                    st.warning(f"⚠️ Failed to load knowledge graph: {e}") 
+            else:
+                st.info("No knowledge graph found.")                
             ##
             st.session_state.embedding_model = metadata[0].get("embedding_model", "text-embedding-3-small")
             st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
@@ -673,12 +685,79 @@ if "index" in st.session_state:
             f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.page_content}"
             for doc in merged
         ]        
+        ##
+        ##
         if use_uploads and st.session_state.get("upload_images"):
             for img in st.session_state.upload_images[:]:
-                context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")
+                context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")        
+        ##        
+        ##
+        ##
+        graph_context_chunks = []
+        query_lower = query.lower() # Prepare query for fuzzy search
+        if st.session_state.graph is not None:
+            try:
+                graph = st.session_state.graph
+                related_nodes = set()
+                # 1. Fuzzy Node Search: Find all nodes relevant to query terms
+                for node_id, data in graph.nodes(data=True):
+                    searchable_text = str(node_id).lower() + " " + str(data.get('type', '')).lower() + " " + str(data.get('properties', {})).lower()
+                    if any(term in searchable_text for term in query_lower.split()):
+                        related_nodes.add(node_id)
+        
+                # 2. Subgraph Traversal: Get 1-hop neighbors for all matched nodes
+                all_context_nodes = set(related_nodes)
+                for entity in related_nodes:
+                    neighbors = nx.single_source_shortest_path_length(graph, entity, cutoff=1).keys()
+                    all_context_nodes.update(neighbors)
 
+                # 3. Format Context into RAG Chunks (Triples and Node Data)
+                for node in list(all_context_nodes):
+                    # Node info
+                    node_data = graph.nodes[node]
+                    node_type = node_data.get('type', '')
+                    node_props = node_data.get("properties", {})
+                    # Adjusted format to be slightly cleaner for the LLM
+                    # graph_context_chunks.append(f"Node: ({node}) | Type: {node_type} | Props: {node_props}")
+                    graph_context_chunks.append(f"{node} - {node_type} | {node_props}")
+
+                    # Edge info (Triples)
+                    for target, edge_dict in graph[node].items():
+                        # Handle NetworkX Multi-DiGraph structure
+                        if isinstance(edge_dict, dict) and all(isinstance(v, dict) for v in edge_dict.values()):
+                            edge_data_list = edge_dict.values()
+                        else:
+                            edge_data_list = [edge_dict]
+                            
+                        # Crucial Fix: Only iterate over and process actual dictionaries.
+                        for data in edge_data_list:
+                            if isinstance(data, dict):
+                                edge_type = data.get("type", "related to")
+                                edge_props = data.get("properties", {})
+                                
+                                # Adjusted format for triples
+                                graph_context_chunks.append(
+                                    # f"Triple: ({node}) -[{edge_type}]-> ({target}) | Edge Props: {edge_props}"
+                                    f"{node} {edge_type} {target} | {edge_props}"                                    
+                                )
+
+                if graph_context_chunks:
+                    st.info(f"🕸️ Graph context expanded with {len(graph_context_chunks)} related entries.")
+                    
+                    # ✅ Add graph-derived context into the main list
+                    graph_context = (
+                        "\n[Knowledge Graph Context]:\n" + 
+                        "\n".join(f"- {g}" for g in graph_context_chunks)
+                    )
+                    # This line integrates the graph context with the text context
+                    context_meta_chunks.append(graph_context)
+            except Exception as e:
+                # Catch potential errors from NetworkX operations or graph structure
+                st.warning(f"⚠️ Graph context expansion failed: {e}")
+
+        ##
         context_meta = "\n\n".join(context_meta_chunks)
-
+            
         # 3) build prompt & call model
         system_instructions = (
             "You are an expert scientific research assistant. Use the context provided from research papers to answer "
