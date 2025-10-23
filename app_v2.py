@@ -320,14 +320,14 @@ embeddings_obj = OpenAIEmbeddings(
 )
 
 # s2: KB setup
-st.header("📂 Knowledge Base Setup")
+st.header("📂 Knowledge-Base Setup")
 option = st.radio(
-    "Choose how you want to set up the knowledge base:",
-    ("📥 Build a new knowledge base", "📤 Load existing knowledge base"),
+    "Choose how you want to set up the Knowledge-Base:",
+    ("📥 Build a new Knowledge-Base", "📤 Load existing Knowledge-Base"),
     index=0
 )
 
-if option == "📥 Build a new knowledge base":
+if option == "📥 Build a new Knowledge-Base":
     st.session_state.embedding_model = st.selectbox(
         "🔍 Select your embedding model:",
         options=["text-embedding-3-small", "text-embedding-3-large"],
@@ -337,31 +337,31 @@ if option == "📥 Build a new knowledge base":
     st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
     st.session_state.pdf_folder = dequote_path(st.text_input(
         "📁 Input Folder path for PDFs:",
-        value='inputs/content/pdfs/temp',
-        help="Path to get the PDFs as input to build the knowledge base"
+        value='inputs',
+        help="Path to get the PDFs as input to build the Knowledge-Base"
     ))
     st.session_state.knowledge_base_name = dequote_path(st.text_input(
         "🧠 Output FAISS index file path (.index)",
-        value='outputs/Test_knowledgebase.index',
+        value='outputs/test_index.index',
         help="Path to save the FAISS index"
     ))
     st.session_state.metadata_name = dequote_path(st.text_input(
         "📝 Output metadata file path (.pkl)",
-        value='outputs/chunk_metadata.pkl',
+        value='outputs/test_metadata.pkl',
         help="Path to save metadata for chunks"
     ))
     st.session_state.graph_name = dequote_path(st.text_input(
-        "🕸️ Output Knowledge Graph file path (.pkl)",
-        value='outputs/knowledge_graph.pkl',
-        help="Path to save the knowledge graph"
+        "🕸️ Output Knowledge-Graph file path (.pkl)",
+        value='outputs/test_knowledge_graph.pkl',
+        help="Path to save the knowledge-Graph"
     ))    
-    if st.button("📚 Build Knowledge Base"):
+    if st.button("📚 Build Knowledge-Base"):
         if not os.path.isdir(st.session_state.pdf_folder):
-            st.error("The provided folder path does not exist.")
+            st.error("The provided folder path does not exist!")
             st.stop()
         pdf_files = list(Path(st.session_state.pdf_folder).glob("*.pdf"))
         if not pdf_files:
-            st.error("No PDF files found in the selected folder.")
+            st.error("No PDF files found in the selected folder!")
             st.stop()
 
         total_chunks = 0
@@ -389,7 +389,7 @@ if option == "📥 Build a new knowledge base":
             progress_percent = int((ipp + 1) / len(pdf_files) * 100)
             progress_bar.progress(progress_percent)
 
-        st.write(f"📦 Total chunks: {total_chunks:,}, Total tokens: {total_tokens:,}.")
+        st.write(f"📦 Total chunks: {total_chunks:,}, Total tokens: {total_tokens:,}!")
 
         # Embedding + index
         st.write("📌 Embedding and indexing...")
@@ -426,7 +426,7 @@ if option == "📥 Build a new knowledge base":
         with open(st.session_state.metadata_name, "wb") as f:
             pickle.dump(all_metadata, f)
 
-        st.success("✅ Knowledge base built and saved!")
+        st.success("✅ Knowledge-Base built and saved!")
         st.session_state.index = index
         st.session_state.metadata = all_metadata
 
@@ -456,7 +456,7 @@ if option == "📥 Build a new knowledge base":
         st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
         ##
         ##
-        # === Build a Knowledge Graph for GraphRAG ===
+        # === Build a Knowledge-Graph for GraphRAG ===
         try:
             llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
             transformer = LLMGraphTransformer(llm=llm)
@@ -474,11 +474,11 @@ if option == "📥 Build a new knowledge base":
 
             total_nodes = sum(len(doc.nodes) for doc in graph_docs)
             total_edges = sum(len(doc.relationships) for doc in graph_docs)            
-            st.write(f"🧩 Extracted graph info → **Nodes:** {total_nodes:,}, **Edges:** {total_edges:,}.")
+            st.write(f"🧩 Extracted graph info → **Nodes:** {total_nodes:,}, **Edges:** {total_edges:,}!")
             ##            
             ##
             graph = nx.Graph()             
-            st.write("🕸️ Forming knowledge graph from extracted info...")                               
+            st.write("🕸️ Forming Knowledge-Graph from extracted info...")                               
             progress_bar = st.progress(0)  
             for idoc, doc in enumerate(graph_docs):
                 for node in doc.nodes:
@@ -500,22 +500,22 @@ if option == "📥 Build a new knowledge base":
             with open(graph_path, "wb") as f:
                 pickle.dump(graph, f)
             st.session_state.graph = graph
-            st.success(f"✅ Knowledge graph built and saved!")
+            st.success(f"✅ Knowledge-Graph built and saved!")
         except Exception as e:
             st.warning(f"⚠️ Graph building failed: {e}")
         ##
         ##
 
 else:  # Load existing
-    index_path = st.text_input("🧠 Index file path (.index)", value='outputs/Test_knowledgebase.index')
-    meta_path = st.text_input("📝 Metadata file path (.pkl)", value='outputs/chunk_metadata.pkl')
-    graph_path = st.text_input("🕸️ Knowledge Graph file path (.pkl)", value='outputs/knowledge_graph.pkl')    
-    if st.button("📂 Load Knowledge Base"):
+    index_path = st.text_input("🧠 Index file path (.index)", value='outputs/test_index.index')
+    meta_path = st.text_input("📝 Metadata file path (.pkl)", value='outputs/test_metadata.pkl')
+    graph_path = st.text_input("🕸️ Knowledge-Graph file path (.pkl)", value='outputs/test_knowledge_graph.pkl')    
+    if st.button("📂 Load Knowledge-Base"):
         if not os.path.isfile(index_path):
-            st.error("Index file not found.")
+            st.error("Index file not found!")
             st.stop()
         if not os.path.isfile(meta_path):
-            st.error("Metadata file not found.")
+            st.error("Metadata file not found!")
             st.stop()
         try:
             index = faiss.read_index(index_path)
@@ -544,25 +544,25 @@ else:  # Load existing
             all_documents = list(docstore._dict.values())
             st.session_state.all_documents = all_documents
             st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
-            st.success(f"✅ Knowledge base loaded successfully! Embedding model: `{st.session_state.embedding_model}`")            
+            st.success(f"✅ Knowledge-Base loaded successfully! Embedding model: `{st.session_state.embedding_model}`")            
             ##
             ##
             if os.path.isfile(graph_path):
                 try:
                     with open(graph_path, "rb") as f:
                         st.session_state.graph = pickle.load(f)
-                    st.success(f"✅ Knowledge graph loaded successfully!")
+                    st.success(f"✅ Knowledge-Graph loaded successfully!")
                 except Exception as e:
-                    st.warning(f"⚠️ Failed to load knowledge graph: {e}") 
+                    st.warning(f"⚠️ Failed to load Knowledge-Graph: {e}") 
             else:
-                st.info("No knowledge graph found.")                
+                st.info("No Knowledge-Graph found!")                
             ##
             st.session_state.embedding_model = metadata[0].get("embedding_model", "text-embedding-3-small")
             st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
             st.session_state.index = index
             st.session_state.metadata = metadata
         except Exception as e:
-            st.error(f"❌ Failed to load knowledge base: {e}")
+            st.error(f"❌ Failed to load Knowledge-Base: {e}")
             st.stop()
 
 st.divider()
@@ -581,7 +581,7 @@ st.session_state.gpt_model = st.selectbox(
         "o4-mini-deep-research-2025-06-26",
     ],
     index=0,
-    help="This model generates the final answer."
+    help="This model generates the final answer!"
 )
 
 with st.expander("🎛️ Advanced Controls: Diversity & Creativity"):
@@ -591,7 +591,7 @@ with st.expander("🎛️ Advanced Controls: Diversity & Creativity"):
         max_value=1.0,
         value=0.7,
         step=0.01,
-        help="Higher values prioritize more varied sources; lower values focus more tightly."
+        help="Higher values prioritize more varied sources; lower values focus more tightly!"
     )
     if st.session_state.gpt_model in ["gpt-4o-2024-08-06", "gpt-4.1-2025-04-14"]:
         temperature = st.slider(
@@ -600,7 +600,7 @@ with st.expander("🎛️ Advanced Controls: Diversity & Creativity"):
             max_value=1.0,
             value=0.3,
             step=0.01,
-            help="Lower values are more deterministic."
+            help="Lower values are more deterministic!"
         )
     else:
         temperature = 0.3
@@ -632,7 +632,7 @@ if "index" in st.session_state:
                 st.session_state.upload_images = up_images
                 n_text = len(up_meta)
                 n_imgs = len(up_images)
-                st.success(f"✅ Processed {n_text} text chunks and {n_imgs} image(s) from the uploaded files.")
+                st.success(f"✅ Processed {n_text} text chunks and {n_imgs} image(s) from the uploaded files!")
             except Exception as e:
                 st.error(f"❌ Upload processing failed: {e}")
         else:
@@ -642,7 +642,7 @@ if "index" in st.session_state:
 
         if use_uploads and "upload_meta" in st.session_state:
             st.caption(f"Uploads ready: {len(st.session_state.get('upload_meta', []))} text chunks, "
-                       f"{len(st.session_state.get('upload_images', []))} images.")
+                       f"{len(st.session_state.get('upload_images', []))} images!")
 
         # 2) retrieve context (KB + optional uploads) via MMR
         query_embedding = client.embeddings.create(
@@ -763,11 +763,11 @@ if "index" in st.session_state:
                                 )
 
                 if graph_context_chunks:
-                    st.info(f"🕸️ Found {len(graph_context_chunks)} related information (nodes/edges) from the knowledge graph.")
+                    st.info(f"🕸️ Found {len(graph_context_chunks)} related information (nodes/edges) from the Knowledge-Graph!")
                     
                     # ✅ Add graph-derived context into the main list
                     graph_context = (
-                        "\n[Knowledge Graph Context]:\n" + 
+                        "\n[Knowledge-Graph Context]:\n" + 
                         "\n".join(f"- {g}" for g in graph_context_chunks)
                     )
                     # This line integrates the graph context with the text context
@@ -868,4 +868,4 @@ Answer:
             st.error(f"❌ Inference failed: {e}")
 
 else:
-    st.info("⚠️ Please build or load a knowledge base before asking a question.")
+    st.info("⚠️ Please build or load a Knowledge-Base before asking a question!")
