@@ -457,13 +457,30 @@ if option == "📥 Build a new knowledge base":
         ##
         ##
         # === Build a Knowledge Graph for GraphRAG ===
-        st.write("🧩 Building knowledge graph...")
         try:
             llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
             transformer = LLMGraphTransformer(llm=llm)
-            graph_docs = transformer.convert_to_graph_documents(all_documents)
-            graph = nx.Graph() 
-            for doc in graph_docs:
+            # graph_docs = transformer.convert_to_graph_documents(all_documents)
+            ##
+            st.write("🧠 Extracting graph info from the documents...")                   
+            progress_bar = st.progress(0)
+            graph_docs = []
+            # Convert each document individually to show live progress
+            for idoc, doc in enumerate(all_documents):
+                gdocs = transformer.convert_to_graph_documents([doc])
+                graph_docs.extend(gdocs)
+                progress = int((idoc + 1) / len(all_documents) * 100)
+                progress_bar.progress(progress)
+
+            total_nodes = sum(len(doc.nodes) for doc in graph_docs)
+            total_edges = sum(len(doc.relationships) for doc in graph_docs)            
+            st.write(f"🧩 Extracted graph info → **Nodes:** {total_nodes:,}, **Edges:** {total_edges:,}.")
+            ##            
+            ##
+            graph = nx.Graph()             
+            st.write("🕸️ Forming knowledge graph from extracted info...")                               
+            progress_bar = st.progress(0)  
+            for idoc, doc in enumerate(graph_docs):
                 for node in doc.nodes:
                     graph.add_node(
                         node.id, 
@@ -477,6 +494,8 @@ if option == "📥 Build a new knowledge base":
                         type=relation.type,
                         properties=getattr(relation, 'properties', {}) 
                     )
+                progress = int(((idoc+1) / len(graph_docs)) * 100)
+                progress_bar.progress(progress)                                        
             graph_path = st.session_state.graph_name
             with open(graph_path, "wb") as f:
                 pickle.dump(graph, f)
@@ -525,13 +544,14 @@ else:  # Load existing
             all_documents = list(docstore._dict.values())
             st.session_state.all_documents = all_documents
             st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
+            st.success(f"✅ Knowledge base loaded successfully! Embedding model: `{st.session_state.embedding_model}`")            
             ##
             ##
             if os.path.isfile(graph_path):
                 try:
                     with open(graph_path, "rb") as f:
                         st.session_state.graph = pickle.load(f)
-                    st.success(f"✅ Knowledge graph loaded!")
+                    st.success(f"✅ Knowledge graph loaded successfully!")
                 except Exception as e:
                     st.warning(f"⚠️ Failed to load knowledge graph: {e}") 
             else:
@@ -541,7 +561,6 @@ else:  # Load existing
             st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
             st.session_state.index = index
             st.session_state.metadata = metadata
-            st.success(f"✅ Knowledge base loaded successfully! Embedding model: `{st.session_state.embedding_model}`")
         except Exception as e:
             st.error(f"❌ Failed to load knowledge base: {e}")
             st.stop()
@@ -613,7 +632,7 @@ if "index" in st.session_state:
                 st.session_state.upload_images = up_images
                 n_text = len(up_meta)
                 n_imgs = len(up_images)
-                st.success(f"✅ Processed {n_text} text chunks and {n_imgs} image(s).")
+                st.success(f"✅ Processed {n_text} text chunks and {n_imgs} image(s) from the uploaded files.")
             except Exception as e:
                 st.error(f"❌ Upload processing failed: {e}")
         else:
@@ -719,7 +738,8 @@ if "index" in st.session_state:
                     node_props = node_data.get("properties", {})
                     # Adjusted format to be slightly cleaner for the LLM
                     # graph_context_chunks.append(f"Node: ({node}) | Type: {node_type} | Props: {node_props}")
-                    graph_context_chunks.append(f"{node} - {node_type} | {node_props}")
+                    # graph_context_chunks.append(f"{node} - {node_type} | {node_props}")
+                    # graph_context_chunks.append(f"({node}) - [{node_type}]")
 
                     # Edge info (Triples)
                     for target, edge_dict in graph[node].items():
@@ -738,11 +758,12 @@ if "index" in st.session_state:
                                 # Adjusted format for triples
                                 graph_context_chunks.append(
                                     # f"Triple: ({node}) -[{edge_type}]-> ({target}) | Edge Props: {edge_props}"
-                                    f"{node} {edge_type} {target} | {edge_props}"                                    
+                                    # f"{node} {edge_type} {target} | {edge_props}"                                    
+                                    f"({node}) - [{edge_type}] - ({target})"                                                                        
                                 )
 
                 if graph_context_chunks:
-                    st.info(f"🕸️ Graph context expanded with {len(graph_context_chunks)} related entries.")
+                    st.info(f"🕸️ Found {len(graph_context_chunks)} related information (nodes/edges) from the knowledge graph.")
                     
                     # ✅ Add graph-derived context into the main list
                     graph_context = (
