@@ -27,6 +27,9 @@ from langchain.retrievers.document_compressors import LLMChainExtractor
 from langchain.retrievers.document_compressors import CrossEncoderReranker
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_community.document_transformers import LongContextReorder
+from langchain_experimental.graph_transformers import LLMGraphTransformer
+import pickle
+import networkx as nx
 
 ################################
 # Helpers 
@@ -347,6 +350,11 @@ if option == "📥 Build a new knowledge base":
         value='outputs/chunk_metadata.pkl',
         help="Path to save metadata for chunks"
     ))
+    st.session_state.graph_name = dequote_path(st.text_input(
+        "🕸️ Output Knowledge Graph file path (.pkl)",
+        value='outputs/knowledge_graph.pkl',
+        help="Path to save the knowledge graph"
+    ))    
     if st.button("📚 Build Knowledge Base"):
         if not os.path.isdir(st.session_state.pdf_folder):
             st.error("The provided folder path does not exist.")
@@ -446,6 +454,37 @@ if option == "📥 Build a new knowledge base":
         all_documents = list(docstore._dict.values())  # each value is a LangChain Document
         st.session_state.all_documents = all_documents
         st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
+        ##
+        ##
+        # === Build a Knowledge Graph for GraphRAG ===
+        st.write("🧩 Building knowledge graph...")
+        try:
+            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+            transformer = LLMGraphTransformer(llm=llm)
+            graph_docs = transformer.convert_to_graph_documents(all_documents)
+            graph = nx.Graph() 
+            for doc in graph_docs:
+                for node in doc.nodes:
+                    graph.add_node(
+                        node.id, 
+                        type=node.type, 
+                        properties=node.properties
+                    )
+                for relation in doc.relationships:
+                    graph.add_edge(
+                        relation.source.id,
+                        relation.target.id,
+                        type=relation.type,
+                        properties=getattr(relation, 'properties', {}) 
+                    )
+            graph_path = st.session_state.graph_name
+            with open(graph_path, "wb") as f:
+                pickle.dump(graph, f)
+            st.session_state.graph = graph
+            st.success(f"✅ Knowledge graph built and saved!")
+        except Exception as e:
+            st.warning(f"⚠️ Graph building failed: {e}")
+        ##
         ##
 
 else:  # Load existing
