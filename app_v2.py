@@ -30,6 +30,7 @@ from langchain_community.document_transformers import LongContextReorder
 from langchain_experimental.graph_transformers import LLMGraphTransformer
 import pickle
 import networkx as nx
+from langchain_core.retrievers import BaseRetriever
 
 ################################
 # Helpers 
@@ -252,7 +253,11 @@ def build_upload_bundle(uploaded_files, client, embedding_model, dimension):
         docs_dict = {
             ids[i]: Document(
                 page_content=text_meta[i]["text"],
-                metadata={"source": text_meta[i]["source"], "chunk_id": text_meta[i]["chunk_id"]}
+                metadata={
+                    "source": text_meta[i]["source"], 
+                    "chunk_id": text_meta[i]["chunk_id"],
+                    "original_content": text_meta[i]["text"], 
+                }
             ) for i in range(len(text_meta))
         }
         docstore = InMemoryDocstore(docs_dict)
@@ -266,6 +271,13 @@ def build_upload_bundle(uploaded_files, client, embedding_model, dimension):
         )
 
     return upload_db, text_meta, images
+
+class StaticGraphRetriever(BaseRetriever):
+    def _get_relevant_documents(self, query, *, run_manager=None):
+        return graph_docs
+    async def _aget_relevant_documents(self, query, *, run_manager=None):
+        return graph_docs                
+    
 
 ################################
 # Globals / Config
@@ -282,6 +294,7 @@ WORDS_PER_CHUNK_OVERLAP = int(TOKENS_PER_CHUNK / 5)  # ~10%
 top_k_textKBfaiss = 50
 top_k_textKBbm = 50
 top_k_addKBfaiss = 25
+top_k_textKBgraph = 25
 
 ################################
 # App UI
@@ -436,7 +449,11 @@ if option == "📥 Build a new Knowledge-Base":
         docs_dict = {
             ids[i]: Document(
                 page_content=meta["text"],
-                metadata={"source": meta["source"], "chunk_id": meta["chunk_id"]}
+                metadata={
+                    "source": meta["source"], 
+                    "chunk_id": meta["chunk_id"],
+                    "original_content": meta["text"],                     
+                }
             )
             for i, meta in enumerate(metadata)
         }
@@ -526,7 +543,11 @@ else:  # Load existing
             docs_dict = {
                 ids[i]: Document(
                     page_content=meta["text"],
-                    metadata={"source": meta["source"], "chunk_id": meta["chunk_id"]}
+                    metadata={
+                        "source": meta["source"], 
+                        "chunk_id": meta["chunk_id"],
+                        "original_content": meta["text"],                    
+                    }
                 )
                 for i, meta in enumerate(metadata)
             }
@@ -679,6 +700,8 @@ if "index" in st.session_state:
             base_retriever=multi_query,
             base_compressor=reranker,
         )        
+        ##
+        ##
         compressor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  
         compressor = LLMChainExtractor.from_llm(compressor_llm)    
         compressed_retriever = ContextualCompressionRetriever(
@@ -704,11 +727,18 @@ if "index" in st.session_state:
             f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.page_content}"
             for doc in merged
         ]        
+        original_cmc = [
+            f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.metadata['original_content']}"
+            for doc in merged
+        ]        
+        
         ## ==> till now (upload-text-faiss)
         ##
         if use_uploads and st.session_state.get("upload_images"):
             for img in st.session_state.upload_images[:]:
-                context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")        
+                context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")  
+                original_cmc.append(f"[uploaded/{img['name']} | image]: (image attached)")  
+                
         ## ==> till now (upload-image)        
         ##
         ##
@@ -759,19 +789,38 @@ if "index" in st.session_state:
                                 graph_context_chunks.append(
                                     # f"Triple: ({node}) -[{edge_type}]-> ({target}) | Edge Props: {edge_props}"
                                     # f"{node} {edge_type} {target} | {edge_props}"                                    
-                                    f"({node}) - [{edge_type}] - ({target})"                                                                        
+                                    f"{node} - {edge_type} - {target}"                                                                        
                                 )
 
                 if graph_context_chunks:
                     st.info(f"🕸️ Found {len(graph_context_chunks)} related information (nodes/edges) from the Knowledge-Graph!")
-                    
-                    # ✅ Add graph-derived context into the main list
-                    graph_context = (
-                        "\n[Knowledge-Graph Context]:\n" + 
-                        "\n".join(f"- {g}" for g in graph_context_chunks)
+                    graph_docs = [
+                        Document(page_content=triple, metadata={"source": "knowledge_graph", "original_content": triple})
+                        for triple in graph_context_chunks
+                    ]
+                    static_graph_retriever = StaticGraphRetriever()                
+                    ce = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
+                    rr = CrossEncoderReranker(model=ce, top_n=top_k_textKBgraph)
+                    compression_retriever = ContextualCompressionRetriever(
+                        base_compressor=rr,
+                        base_retriever=static_graph_retriever,
                     )
-                    # This line integrates the graph context with the text context
+                    top_docs = compression_retriever.invoke(query)
+                    selected_sentences = [doc.page_content for doc in top_docs]
+                    st.success(f"✅ Added top {len(selected_sentences)} graph triples to context.")
+                    graph_context = (
+                        "\n[Knowledge-Graph Context]:\n"
+                        + "\n".join(f"- {s}" for s in selected_sentences)
+                    )
                     context_meta_chunks.append(graph_context)
+                    ##
+                    original_ss = [doc.metadata['original_content'] for doc in top_docs]                    
+                    original_gc = (
+                        "\n[Knowledge-Graph Context]:\n"
+                        + "\n".join(f"- {s}" for s in original_ss)
+                    )
+                    original_cmc.append(original_gc)
+                    ##
                     ## ==> till now (KB-text-graph) 
                     ##
             except Exception as e:
@@ -780,6 +829,7 @@ if "index" in st.session_state:
 
         ##
         context_meta = "\n\n".join(context_meta_chunks)
+        original_cm = "\n\n".join(original_cmc)
             
         # 3) build prompt & call model
         system_instructions = (
@@ -863,7 +913,8 @@ Answer:
             st.write(answer_text.strip())
 
             with st.expander("📚 Retrieved Context for this Query"):
-                context_meta_html = context_meta.replace("\n", "<br>")
+                # context_meta_html = original_cm.replace("\n", "<br>")
+                context_meta_html = context_meta.replace("\n", "<br>")                
                 st.markdown(f"<div style='overflow-wrap: break-word; width: 600px'>{context_meta_html}</div>", unsafe_allow_html=True)
 
         except Exception as e:
