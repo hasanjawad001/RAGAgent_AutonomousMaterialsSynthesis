@@ -353,7 +353,7 @@ if option == "📥 Build a new Knowledge-Base":
     st.session_state.graph_name = dequote_path(st.text_input(
         "🕸️ Output Knowledge-Graph file path (.pkl)",
         value='outputs/test_knowledge_graph.pkl',
-        help="Path to save the knowledge-Graph"
+        help="Path to save the Knowledge-Graph"
     ))    
     if st.button("📚 Build Knowledge-Base"):
         if not os.path.isdir(st.session_state.pdf_folder):
@@ -688,8 +688,8 @@ if "index" in st.session_state:
         results = compressed_retriever.invoke(query)
         reorder = LongContextReorder()
         results = reorder.transform_documents(results)        
-        ##
-        ##
+        ## ==> till now (KB-text-faiss, KB-text-bm, KB-text-Engi)
+        ## 
         results_up = []
         if use_uploads and st.session_state.get("upload_db") is not None:
             results_up = st.session_state.upload_db.max_marginal_relevance_search_by_vector(
@@ -704,12 +704,12 @@ if "index" in st.session_state:
             f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.page_content}"
             for doc in merged
         ]        
-        ##
+        ## ==> till now (upload-text-faiss)
         ##
         if use_uploads and st.session_state.get("upload_images"):
             for img in st.session_state.upload_images[:]:
                 context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")        
-        ##        
+        ## ==> till now (upload-image)        
         ##
         ##
         graph_context_chunks = []
@@ -772,6 +772,8 @@ if "index" in st.session_state:
                     )
                     # This line integrates the graph context with the text context
                     context_meta_chunks.append(graph_context)
+                    ## ==> till now (KB-text-graph) 
+                    ##
             except Exception as e:
                 # Catch potential errors from NetworkX operations or graph structure
                 st.warning(f"⚠️ Graph context expansion failed: {e}")
