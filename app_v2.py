@@ -32,6 +32,10 @@ from langchain_experimental.graph_transformers import LLMGraphTransformer
 import pickle
 import networkx as nx
 from langchain_core.retrievers import BaseRetriever
+from langchain.globals import set_llm_cache
+from langchain_community.cache import SQLiteCache
+
+set_llm_cache(SQLiteCache(database_path=".cache.db"))
 
 ################################
 # Helpers 
