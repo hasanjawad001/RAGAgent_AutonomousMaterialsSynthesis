@@ -12,6 +12,7 @@ import openai
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import pycountry
+import time
 from langchain_community.vectorstores import FAISS 
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_core.documents import Document
@@ -864,54 +865,82 @@ Answer:
         model_choice = st.session_state.gpt_model
 
         try:
+##
+            st.markdown("### 💡 Answer")
+            placeholder = st.empty()
+            answer_text = ""
+            
             if model_choice == "o4-mini-deep-research-2025-06-26":
-                # Deep research with web preview
-                response = client.responses.create(
+                with client.responses.stream(
                     model=model_choice,
                     instructions=system_instructions,
                     tools=[{"type": "web_search_preview"}],
                     input=prompt_text,
-                )
-                answer_text = response.output_text
-
+                ) as stream:
+                    for event in stream:
+                        if event.type == "response.output_text.delta":
+                            answer_text += event.delta
+                            placeholder.markdown(answer_text + "▌")
+                            time.sleep(0.1)  
+                        elif event.type == "response.error":
+                            st.error(str(event.error))
+                        elif event.type in {"response.output_text.done", "response.completed"}:
+                            placeholder.markdown(answer_text)     
+                            
             elif model_choice in ["gpt-4o-2024-08-06", "gpt-4.1-2025-04-14"]:
-                # Multimodal via Chat Completions
-                response = client.chat.completions.create(
+                with client.chat.completions.stream(
                     model=model_choice,
                     messages=[
                         {"role": "system", "content": system_instructions},
                         {"role": "user", "content": user_content},
                     ],
                     temperature=temperature,
-                )
-                answer_text = response.choices[0].message.content
-
+                ) as stream:
+                    for event in stream:
+                        if event.type == "content.delta":
+                            answer_text += event.delta
+                            placeholder.markdown(answer_text + "▌")
+                            time.sleep(0.1)
+                        elif event.type == "content.done":
+                            placeholder.markdown(answer_text)
+            
             elif model_choice in {"gpt-5", "gpt-5-thinking", "gpt-5-pro"}:
-                # GPT-5 series via Responses API (text route).
-                # We still keep full upload capabilities: uploaded text is embedded and retrieved into CONTEXT above;
-                # uploaded images are listed in the context so users know which were attached.
-                # (If/when your GPT‑5 tier supports image inputs via Responses, you can adapt to send image_url parts.)
                 model_id = "gpt-5" if model_choice == "gpt-5-thinking" else model_choice
                 kwargs = {"model": model_id, "instructions": system_instructions, "input": prompt_text}
                 if model_choice == "gpt-5-thinking":
                     kwargs["reasoning"] = {"effort": "high"}
-                response = client.responses.create(**kwargs)
-                answer_text = response.output_text
-
+                try:
+                    with client.responses.stream(**kwargs) as stream:
+                        for event in stream:
+                            if event.type == "response.output_text.delta":
+                                answer_text += event.delta
+                                placeholder.markdown(answer_text + "▌")
+                                time.sleep(0.1)
+                            elif event.type == "response.error":
+                                st.error(str(event.error))
+                            elif event.type in {"response.output_text.done", "response.completed"}:
+                                placeholder.markdown(answer_text)
+                except Exception as e:
+                    st.warning(f"⚠️ Streaming not supported for this model: {e}")
+                    response = client.responses.create(**kwargs)
+                    answer_text = response.output_text
+                    placeholder.markdown(answer_text)            
             else:
-                # o4-mini text route
-                response = client.chat.completions.create(
+                with client.chat.completions.stream(
                     model=model_choice,
                     messages=[
                         {"role": "system", "content": system_instructions},
                         {"role": "user", "content": prompt_text},
                     ],
-                )
-                answer_text = response.choices[0].message.content
-
-            st.markdown("### 💡 Answer")
-            st.write(answer_text.strip())
-
+                ) as stream:
+                    for event in stream:
+                        if event.type == "content.delta":
+                            answer_text += event.delta
+                            placeholder.markdown(answer_text + "▌")
+                            time.sleep(0.1)
+                        elif event.type == "content.done":
+                            placeholder.markdown(answer_text)
+## 
             with st.expander("📚 Retrieved Context for this Query"):
                 # context_meta_html = original_cm.replace("\n", "<br>")
                 context_meta_html = context_meta.replace("\n", "<br>")                
