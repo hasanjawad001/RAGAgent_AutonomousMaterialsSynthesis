@@ -341,11 +341,11 @@ embeddings_obj = OpenAIEmbeddings(
 st.header("📂 Knowledge-Base Setup")
 option = st.radio(
     "Choose how you want to set up the Knowledge-Base:",
-    ("📥 Build a new Knowledge-Base", "📤 Load existing Knowledge-Base"),
+    ("📚 Build a new Knowledge-Base", "📤 Load existing Knowledge-Base", "➕ Append existing Knowledge-Base"),
     index=0
 )
 
-if option == "📥 Build a new Knowledge-Base":
+if option == "📚 Build a new Knowledge-Base":
     st.session_state.embedding_model = st.selectbox(
         "🔍 Select your embedding model:",
         options=["text-embedding-3-small", "text-embedding-3-large"],
@@ -527,12 +527,11 @@ if option == "📥 Build a new Knowledge-Base":
             st.warning(f"⚠️ Graph building failed: {e}")
         ##
         ##
-
-else:  # Load existing
+elif option == "📤 Load existing Knowledge-Base":
     index_path = st.text_input("🧠 Index file path (.index)", value='outputs/test_index.index')
     meta_path = st.text_input("📝 Metadata file path (.pkl)", value='outputs/test_metadata.pkl')
     graph_path = st.text_input("🕸️ Knowledge-Graph file path (.pkl)", value='outputs/test_knowledge_graph.pkl')    
-    if st.button("📂 Load Knowledge-Base"):
+    if st.button("📤 Load Knowledge-Base"):
         if not os.path.isfile(index_path):
             st.error("Index file not found!")
             st.stop()
@@ -566,11 +565,16 @@ else:  # Load existing
             )
             st.session_state.db = db
             ##
+            st.session_state.embedding_model = metadata[0].get("embedding_model", "text-embedding-3-small")
+            st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
+            st.session_state.index = index
+            st.session_state.metadata = metadata            
+            st.success(f"✅ Knowledge-Base loaded successfully! Embedding model: `{st.session_state.embedding_model}`")                        
+            ##
             # === NEW: same as above for loaded KB ===
             all_documents = list(docstore._dict.values())
             st.session_state.all_documents = all_documents
-            st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
-            st.success(f"✅ Knowledge-Base loaded successfully! Embedding model: `{st.session_state.embedding_model}`")            
+            st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)            
             ##
             ##
             if os.path.isfile(graph_path):
@@ -583,13 +587,217 @@ else:  # Load existing
             else:
                 st.info("No Knowledge-Graph found!")                
             ##
-            st.session_state.embedding_model = metadata[0].get("embedding_model", "text-embedding-3-small")
-            st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
-            st.session_state.index = index
-            st.session_state.metadata = metadata
         except Exception as e:
             st.error(f"❌ Failed to load Knowledge-Base: {e}")
             st.stop()
+            
+elif option == "➕ Append existing Knowledge-Base":
+    exist_index_path = st.text_input("🧠 Existing index file path (.index)", value="outputs/test_index.index")
+    exist_meta_path  = st.text_input("📝 Existing metadata file path (.pkl)", value="outputs/test_metadata.pkl")
+    exist_graph_path = st.text_input("🕸️ Existing Knowledge-Graph file path (.pkl)", value="outputs/test_knowledge_graph.pkl")
+
+    # New PDFs to append
+    append_folder = dequote_path(st.text_input(
+        "📁 Input Folder path for NEW PDFs to append:",
+        value="inputs/new",
+        help="Path to get the NEW PDFs to be appended"
+    ))
+
+    # Output targets (write updated artifacts)
+    out_index_path = dequote_path(st.text_input("🧠 Output (updated) FAISS index file path (.index)", value="outputs/test_index_appended.index"))
+    out_meta_path  = dequote_path(st.text_input("📝 Output (updated) metadata file path (.pkl)", value="outputs/test_metadata_appended.pkl"))
+    out_graph_path = dequote_path(st.text_input("🕸️ Output (updated) Knowledge-Graph file path (.pkl)", value="outputs/test_knowledge_graph_appended.pkl"))
+
+    if st.button("➕ Append to Knowledge-Base"):
+        # 0) Sanity checks
+        if not os.path.isfile(exist_index_path):
+            st.error("Existing FAISS index file not found!"); st.stop()
+        if not os.path.isfile(exist_meta_path):
+            st.error("Existing metadata file not found!"); st.stop()
+        if not os.path.isdir(append_folder):
+            st.error("Append folder does not exist!"); st.stop()
+
+        # 1) Load existing artifacts
+        try:
+            index = faiss.read_index(exist_index_path)
+            with open(exist_meta_path, "rb") as f:
+                metadata_existing = pickle.load(f)
+        except Exception as e:
+            st.error(f"❌ Failed to load existing Knowledge-Base: {e}"); st.stop()
+
+        # 1a) Verify embedding model compatibility
+        existing_model = metadata_existing[0].get("embedding_model", st.session_state.embedding_model)
+        st.session_state.embedding_model = existing_model
+        st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
+
+        # 2) Collect NEW PDFs
+        pdf_files = list(Path(append_folder).glob("*.pdf"))
+        if not pdf_files:
+            st.warning("No PDFs found in the append folder!")
+            st.stop()
+
+        # 3) Extract / clean / chunk new PDFs
+        st.write("🔍 Processing NEW PDFs to append...")
+        progress_bar = st.progress(0)
+        new_chunks_by_file = {}
+        total_new_chunks = 0
+        total_new_tokens = 0
+
+        for i, pdf_path in enumerate(pdf_files):
+            try:
+                text = extract_text_from_pdf(pdf_path)
+                text = remove_junk_sections(text)
+                text = remove_junk_lines(text)
+                chunks = chunk_text2(text, max_tokens=TOKENS_PER_CHUNK, tokenizer=enc, overlap=WORDS_PER_CHUNK_OVERLAP)
+                token_count = sum(len(enc.encode(c)) for c in chunks)
+                new_chunks_by_file[pdf_path.name] = chunks
+                total_new_chunks += len(chunks)
+                total_new_tokens += token_count
+            except Exception as e:
+                st.warning(f"⚠️ Failed on {pdf_path.name}: {e}")
+            progress_bar.progress(int((i+1)/len(pdf_files)*100))
+
+        if total_new_chunks == 0:
+            st.info("No new chunks were produced from the append PDFs."); st.stop()
+
+        st.write(f"📦 New chunks: {total_new_chunks:,}, New tokens: {total_new_tokens:,}")
+
+        # 4) Embed NEW chunks and append to FAISS
+        st.write("📌 Embedding and appending to FAISS...")
+        new_embeddings = []
+        new_metadata = []
+        count = 0
+        progress_bar = st.progress(0)
+
+        for filename, chunks in new_chunks_by_file.items():
+            for j, chunk in enumerate(chunks):
+                try:
+                    resp = client.embeddings.create(input=chunk, model=st.session_state.embedding_model)
+                    emb = resp.data[0].embedding
+                    new_embeddings.append(emb)
+                    new_metadata.append({
+                        "source": filename,
+                        "chunk_id": j,
+                        "text": chunk,
+                        "embedding_model": st.session_state.embedding_model
+                    })
+                except Exception as e:
+                    st.warning(f"⚠️ Embedding failed: {filename}, chunk {j} → {e}")
+                count += 1
+                progress_bar.progress(int(count / total_new_chunks * 100))
+
+        if not new_embeddings:
+            st.error("No new embeddings computed; aborting..."); st.stop()
+
+        new_mat = np.array(new_embeddings, dtype="float32")
+        try:
+            # Ensure dimension matches
+            if new_mat.shape[1] != d_em2dim[st.session_state.embedding_model]:
+                st.error("Embedding dimension mismatch. Aborting."); st.stop()
+            index.add(new_mat)
+        except Exception as e:
+            st.error(f"Failed to append vectors to FAISS: {e}"); st.stop()
+
+        # 5) Merge metadata and write outputs
+        updated_metadata = metadata_existing + new_metadata
+        os.makedirs(os.path.dirname(out_index_path), exist_ok=True)
+        os.makedirs(os.path.dirname(out_meta_path), exist_ok=True)
+        faiss.write_index(index, out_index_path)
+        with open(out_meta_path, "wb") as f:
+            pickle.dump(updated_metadata, f)
+
+        # 6) Rebuild LangChain FAISS wrapper + BM25 over all docs (existing + new)
+        try:
+            ids = [str(i) for i in range(len(updated_metadata))]
+            docs_dict = {
+                ids[i]: Document(
+                    page_content=meta["text"],
+                    metadata={
+                        "source": meta["source"],
+                        "chunk_id": meta["chunk_id"],
+                        "original_content": meta.get("original_content", meta["text"]),
+                    }
+                )
+                for i, meta in enumerate(updated_metadata)
+            }
+            docstore = InMemoryDocstore(docs_dict)
+            index_to_docstore_id = {i: ids[i] for i in range(len(ids))}
+            db = FAISS(
+                embedding_function=embeddings_obj,
+                index=index,
+                docstore=docstore,
+                index_to_docstore_id=index_to_docstore_id,
+            )
+            st.session_state.db = db
+            all_documents = list(docstore._dict.values())
+            st.session_state.all_documents = all_documents
+            st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
+        except Exception as e:
+            st.warning(f"KB wrapper rebuild warning: {e}")
+
+        # 7) Append to Knowledge-Graph only with NEW docs
+        st.write("🕸️ Updating Knowledge-Graph with new info...")
+        try:
+            # Load existing graph (or start fresh)
+            if os.path.isfile(exist_graph_path):
+                with open(exist_graph_path, "rb") as f:
+                    graph = pickle.load(f)
+                if not isinstance(graph, nx.Graph):
+                    graph = nx.Graph(graph)
+            else:
+                graph = nx.Graph()
+
+            # Convert only NEW docs to graph docs
+            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+            transformer = LLMGraphTransformer(llm=llm)
+
+            # Create Document objects for NEW chunks only
+            new_doc_objs = []
+            for meta in new_metadata:
+                new_doc_objs.append(
+                    Document(
+                        page_content=meta["text"],
+                        metadata={
+                            "source": meta["source"], 
+                            "chunk_id": meta["chunk_id"],
+                            "original_content": meta.get("original_content", meta["text"]),
+                        }
+                    )
+                )
+
+            # Progress feedback
+            progress_bar = st.progress(0)
+            graph_docs = []
+            for i, d in enumerate(new_doc_objs):
+                gdocs = transformer.convert_to_graph_documents([d])
+                graph_docs.extend(gdocs)
+                progress_bar.progress(int((i+1)/max(1,len(new_doc_objs))*100))
+
+            # Add nodes/edges (light de-duplication happens naturally in NetworkX add)
+            for gdoc in graph_docs:
+                for node in gdoc.nodes:
+                    graph.add_node(node.id, type=node.type, properties=node.properties)
+                for rel in gdoc.relationships:
+                    graph.add_edge(
+                        rel.source.id, rel.target.id,
+                        type=rel.type,
+                        properties=getattr(rel, "properties", {})
+                    )
+
+            # Write updated graph to the chosen output
+            os.makedirs(os.path.dirname(out_graph_path), exist_ok=True)
+            with open(out_graph_path, "wb") as f:
+                pickle.dump(graph, f)
+            st.session_state.graph = graph
+
+        except Exception as e:
+            st.warning(f"⚠️ Graph append failed: {e}")
+
+        # 8) Persist in session_state and finalize
+        st.session_state.index = index
+        st.session_state.metadata = updated_metadata
+        st.success("✅ Append completed! Updated index/metadata/graph have been saved!")
+            
 
 st.divider()
 
@@ -950,8 +1158,8 @@ Answer:
                             placeholder.markdown(answer_text)
 ## 
             with st.expander("📚 Retrieved Context for this Query"):
-                # context_meta_html = original_cm.replace("\n", "<br>")
-                context_meta_html = context_meta.replace("\n", "<br>")                
+                context_meta_html = original_cm.replace("\n", "<br>")
+                # context_meta_html = context_meta.replace("\n", "<br>")                
                 st.markdown(f"<div style='overflow-wrap: break-word; width: 600px'>{context_meta_html}</div>", unsafe_allow_html=True)
 
         except Exception as e:
