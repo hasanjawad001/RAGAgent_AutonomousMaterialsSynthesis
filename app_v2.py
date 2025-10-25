@@ -641,158 +641,161 @@ if "index" in st.session_state:
 
     if st.button("💬 Answer") and query:
         # 1) process uploads (text + images), cache for reuse
-        if uploaded_files:
-            try:
-                up_db, up_meta, up_images = build_upload_bundle(
-                    uploaded_files=uploaded_files,
-                    client=client,
-                    embedding_model=st.session_state.embedding_model,
-                    dimension=d_em2dim[st.session_state.embedding_model]
-                )
-                st.session_state.upload_db = up_db
-                st.session_state.upload_meta = up_meta
-                st.session_state.upload_images = up_images
-                n_text = len(up_meta)
-                n_imgs = len(up_images)
-                st.success(f"✅ Processed {n_text} text chunks and {n_imgs} image(s) from the uploaded files!")
-            except Exception as e:
-                st.error(f"❌ Upload processing failed: {e}")
-        else:
-            st.session_state.upload_db = None
-            st.session_state.upload_meta = []
-            st.session_state.upload_images = []
-
-        if use_uploads and "upload_meta" in st.session_state:
-            st.caption(f"Uploads ready: {len(st.session_state.get('upload_meta', []))} text chunks, "
-                       f"{len(st.session_state.get('upload_images', []))} images!")
+        with st.spinner("📂 Processing uploaded files..."):        
+            if uploaded_files:
+                try:
+                    up_db, up_meta, up_images = build_upload_bundle(
+                        uploaded_files=uploaded_files,
+                        client=client,
+                        embedding_model=st.session_state.embedding_model,
+                        dimension=d_em2dim[st.session_state.embedding_model]
+                    )
+                    st.session_state.upload_db = up_db
+                    st.session_state.upload_meta = up_meta
+                    st.session_state.upload_images = up_images
+                    n_text = len(up_meta)
+                    n_imgs = len(up_images)
+                    st.success(f"✅ Processed {n_text} text chunks and {n_imgs} image(s) from the uploaded files!")
+                except Exception as e:
+                    st.error(f"❌ Upload processing failed: {e}")
+            else:
+                st.session_state.upload_db = None
+                st.session_state.upload_meta = []
+                st.session_state.upload_images = []
+    
+            if use_uploads and "upload_meta" in st.session_state:
+                st.caption(f"Uploads ready: {len(st.session_state.get('upload_meta', []))} text chunks, "
+                           f"{len(st.session_state.get('upload_images', []))} images!")
 
         # 2) retrieve context (KB + optional uploads) via MMR
-        query_embedding = client.embeddings.create(
-            input=query,
-            model=st.session_state.embedding_model
-        ).data[0].embedding
-        query_embedding = np.array(query_embedding, dtype="float32").reshape(1, -1)
-        flat_emb = query_embedding[0].astype(float).tolist()
-        
-        ##
-        ##
-        # results = st.session_state.db.max_marginal_relevance_search_by_vector(
-        #     embedding=flat_emb, k=top_k_textKBfaiss, fetch_k=top_k_textKBfaiss * 2, lambda_mult=1.0 - diversity
-        # )
-        vs_retriever = st.session_state.db.as_retriever(
-            search_type="mmr",
-            search_kwargs={
-                "k": top_k_textKBfaiss,
-                "fetch_k": top_k_textKBfaiss * 2,
-                "lambda_mult": 1.0 - diversity,
-            },
-        )
-        bm25 = st.session_state.bm25
-        hybrid = EnsembleRetriever(retrievers=[vs_retriever, bm25])
-        llm_expander = ChatOpenAI(model="gpt-4o-mini")
-        multi_query = MultiQueryRetriever.from_llm(
-            retriever=hybrid,
-            llm=llm_expander,
-            include_original=True,
-        ) 
-        cross_encoder = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
-        reranker = CrossEncoderReranker(model=cross_encoder)        
-        reranked_exapanded = ContextualCompressionRetriever(
-            base_retriever=multi_query,
-            base_compressor=reranker,
-        )        
-        ##
-        ##
-        compressor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  
-        compressor = LLMChainExtractor.from_llm(compressor_llm)    
-        compressed_retriever = ContextualCompressionRetriever(
-            base_retriever=reranked_exapanded,
-            base_compressor=compressor,
-        )        
-        results = compressed_retriever.invoke(query)
-        reorder = LongContextReorder()
-        results = reorder.transform_documents(results)        
-        ## ==> till now (KB-text-faiss, KB-text-bm, KB-text-Engi)
-        ## 
-        results_up = []
-        if use_uploads and st.session_state.get("upload_db") is not None:
-            results_up = st.session_state.upload_db.max_marginal_relevance_search_by_vector(
-                embedding=flat_emb, k=top_k_addKBfaiss, fetch_k=top_k_addKBfaiss * 2, lambda_mult=1.0 - diversity
+        with st.spinner("🔍 Retrieving relevant context from Knowledge-Base..."):        
+            query_embedding = client.embeddings.create(
+                input=query,
+                model=st.session_state.embedding_model
+            ).data[0].embedding
+            query_embedding = np.array(query_embedding, dtype="float32").reshape(1, -1)
+            flat_emb = query_embedding[0].astype(float).tolist()
+            
+            ##
+            ##
+            # results = st.session_state.db.max_marginal_relevance_search_by_vector(
+            #     embedding=flat_emb, k=top_k_textKBfaiss, fetch_k=top_k_textKBfaiss * 2, lambda_mult=1.0 - diversity
+            # )
+            vs_retriever = st.session_state.db.as_retriever(
+                search_type="mmr",
+                search_kwargs={
+                    "k": top_k_textKBfaiss,
+                    "fetch_k": top_k_textKBfaiss * 2,
+                    "lambda_mult": 1.0 - diversity,
+                },
             )
-
-        merged = results[:int((top_k_textKBfaiss+top_k_textKBbm)/10)]        
-        if results_up:
-            merged.extend(results_up[:int(top_k_addKBfaiss/5)])
-
-        context_meta_chunks = [
-            f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.page_content}"
-            for doc in merged
-        ]        
-        original_cmc = [
-            f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.metadata['original_content']}"
-            for doc in merged
-        ]        
-        
-        ## ==> till now (upload-text-faiss)
-        ##
-        if use_uploads and st.session_state.get("upload_images"):
-            for img in st.session_state.upload_images[:]:
-                context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")  
-                original_cmc.append(f"[uploaded/{img['name']} | image]: (image attached)")  
-                
-        ## ==> till now (upload-image)        
-        ##
+            bm25 = st.session_state.bm25
+            hybrid = EnsembleRetriever(retrievers=[vs_retriever, bm25])
+            llm_expander = ChatOpenAI(model="gpt-4o-mini")
+            multi_query = MultiQueryRetriever.from_llm(
+                retriever=hybrid,
+                llm=llm_expander,
+                include_original=True,
+            ) 
+            cross_encoder = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
+            reranker = CrossEncoderReranker(model=cross_encoder)        
+            reranked_exapanded = ContextualCompressionRetriever(
+                base_retriever=multi_query,
+                base_compressor=reranker,
+            )        
+            ##
+            ##
+            compressor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  
+            compressor = LLMChainExtractor.from_llm(compressor_llm)    
+            compressed_retriever = ContextualCompressionRetriever(
+                base_retriever=reranked_exapanded,
+                base_compressor=compressor,
+            )        
+            results = compressed_retriever.invoke(query)
+            reorder = LongContextReorder()
+            results = reorder.transform_documents(results)        
+            ## ==> till now (KB-text-faiss, KB-text-bm, KB-text-Engi)
+            ## 
+            results_up = []
+            if use_uploads and st.session_state.get("upload_db") is not None:
+                results_up = st.session_state.upload_db.max_marginal_relevance_search_by_vector(
+                    embedding=flat_emb, k=top_k_addKBfaiss, fetch_k=top_k_addKBfaiss * 2, lambda_mult=1.0 - diversity
+                )
+    
+            merged = results[:int((top_k_textKBfaiss+top_k_textKBbm)/10)]        
+            if results_up:
+                merged.extend(results_up[:int(top_k_addKBfaiss/5)])
+    
+            context_meta_chunks = [
+                f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.page_content}"
+                for doc in merged
+            ]        
+            original_cmc = [
+                f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.metadata['original_content']}"
+                for doc in merged
+            ]        
+            
+            ## ==> till now (upload-text-faiss)
+            ##
+            if use_uploads and st.session_state.get("upload_images"):
+                for img in st.session_state.upload_images[:]:
+                    context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")  
+                    original_cmc.append(f"[uploaded/{img['name']} | image]: (image attached)")  
+                    
+            ## ==> till now (upload-image)        
+            ##
         ##
         graph_context_chunks = []
         query_lower = query.lower() # Prepare query for fuzzy search
         if st.session_state.graph is not None:
             try:
-                graph = st.session_state.graph
-                related_nodes = set()
-                # 1. Fuzzy Node Search: Find all nodes relevant to query terms
-                for node_id, data in graph.nodes(data=True):
-                    searchable_text = str(node_id).lower() + " " + str(data.get('type', '')).lower() + " " + str(data.get('properties', {})).lower()
-                    if any(term in searchable_text for term in query_lower.split()):
-                        related_nodes.add(node_id)
-        
-                # 2. Subgraph Traversal: Get 1-hop neighbors for all matched nodes
-                all_context_nodes = set(related_nodes)
-                for entity in related_nodes:
-                    neighbors = nx.single_source_shortest_path_length(graph, entity, cutoff=1).keys()
-                    all_context_nodes.update(neighbors)
-
-                # 3. Format Context into RAG Chunks (Triples and Node Data)
-                for node in list(all_context_nodes):
-                    # Node info
-                    node_data = graph.nodes[node]
-                    node_type = node_data.get('type', '')
-                    node_props = node_data.get("properties", {})
-                    # Adjusted format to be slightly cleaner for the LLM
-                    # graph_context_chunks.append(f"Node: ({node}) | Type: {node_type} | Props: {node_props}")
-                    # graph_context_chunks.append(f"{node} - {node_type} | {node_props}")
-                    # graph_context_chunks.append(f"({node}) - [{node_type}]")
-
-                    # Edge info (Triples)
-                    for target, edge_dict in graph[node].items():
-                        # Handle NetworkX Multi-DiGraph structure
-                        if isinstance(edge_dict, dict) and all(isinstance(v, dict) for v in edge_dict.values()):
-                            edge_data_list = edge_dict.values()
-                        else:
-                            edge_data_list = [edge_dict]
-                            
-                        # Crucial Fix: Only iterate over and process actual dictionaries.
-                        for data in edge_data_list:
-                            if isinstance(data, dict):
-                                edge_type = data.get("type", "related to")
-                                edge_props = data.get("properties", {})
+                with st.spinner("🕸️ Searching relevant entities and relationships from Knowledge-Graph..."):            
+                    graph = st.session_state.graph
+                    related_nodes = set()
+                    # 1. Fuzzy Node Search: Find all nodes relevant to query terms
+                    for node_id, data in graph.nodes(data=True):
+                        searchable_text = str(node_id).lower() + " " + str(data.get('type', '')).lower() + " " + str(data.get('properties', {})).lower()
+                        if any(term in searchable_text for term in query_lower.split()):
+                            related_nodes.add(node_id)
+            
+                    # 2. Subgraph Traversal: Get 1-hop neighbors for all matched nodes
+                    all_context_nodes = set(related_nodes)
+                    for entity in related_nodes:
+                        neighbors = nx.single_source_shortest_path_length(graph, entity, cutoff=1).keys()
+                        all_context_nodes.update(neighbors)
+    
+                    # 3. Format Context into RAG Chunks (Triples and Node Data)
+                    for node in list(all_context_nodes):
+                        # Node info
+                        node_data = graph.nodes[node]
+                        node_type = node_data.get('type', '')
+                        node_props = node_data.get("properties", {})
+                        # Adjusted format to be slightly cleaner for the LLM
+                        # graph_context_chunks.append(f"Node: ({node}) | Type: {node_type} | Props: {node_props}")
+                        # graph_context_chunks.append(f"{node} - {node_type} | {node_props}")
+                        # graph_context_chunks.append(f"({node}) - [{node_type}]")
+    
+                        # Edge info (Triples)
+                        for target, edge_dict in graph[node].items():
+                            # Handle NetworkX Multi-DiGraph structure
+                            if isinstance(edge_dict, dict) and all(isinstance(v, dict) for v in edge_dict.values()):
+                                edge_data_list = edge_dict.values()
+                            else:
+                                edge_data_list = [edge_dict]
                                 
-                                # Adjusted format for triples
-                                graph_context_chunks.append(
-                                    # f"Triple: ({node}) -[{edge_type}]-> ({target}) | Edge Props: {edge_props}"
-                                    # f"{node} {edge_type} {target} | {edge_props}"                                    
-                                    f"{node} - {edge_type} - {target}"                                                                        
-                                )
-
+                            # Crucial Fix: Only iterate over and process actual dictionaries.
+                            for data in edge_data_list:
+                                if isinstance(data, dict):
+                                    edge_type = data.get("type", "related to")
+                                    edge_props = data.get("properties", {})
+                                    
+                                    # Adjusted format for triples
+                                    graph_context_chunks.append(
+                                        # f"Triple: ({node}) -[{edge_type}]-> ({target}) | Edge Props: {edge_props}"
+                                        # f"{node} {edge_type} {target} | {edge_props}"                                    
+                                        f"{node} - {edge_type} - {target}"                                                                        
+                                    )
+    
                 if graph_context_chunks:
                     st.info(f"🕸️ Found {len(graph_context_chunks)} related information (nodes/edges) from the Knowledge-Graph!")
                     graph_docs = [
@@ -808,7 +811,8 @@ if "index" in st.session_state:
                     )
                     top_docs = compression_retriever.invoke(query)
                     selected_sentences = [doc.page_content for doc in top_docs]
-                    st.success(f"✅ Added top {len(selected_sentences)} graph triples to context.")
+                    # st.success(f"✅ Added top {len(selected_sentences)} graph triples to context.")
+                    st.success(f"✅ Context expansion done with additional information from Knowledge-Graph!")
                     graph_context = (
                         "\n[Knowledge-Graph Context]:\n"
                         + "\n".join(f"- {s}" for s in selected_sentences)
@@ -881,7 +885,7 @@ Answer:
                         if event.type == "response.output_text.delta":
                             answer_text += event.delta
                             placeholder.markdown(answer_text + "▌")
-                            time.sleep(0.1)  
+                            time.sleep(0.08)  
                         elif event.type == "response.error":
                             st.error(str(event.error))
                         elif event.type in {"response.output_text.done", "response.completed"}:
@@ -900,7 +904,7 @@ Answer:
                         if event.type == "content.delta":
                             answer_text += event.delta
                             placeholder.markdown(answer_text + "▌")
-                            time.sleep(0.1)
+                            time.sleep(0.08)
                         elif event.type == "content.done":
                             placeholder.markdown(answer_text)
             
@@ -915,7 +919,7 @@ Answer:
                             if event.type == "response.output_text.delta":
                                 answer_text += event.delta
                                 placeholder.markdown(answer_text + "▌")
-                                time.sleep(0.1)
+                                time.sleep(0.08)
                             elif event.type == "response.error":
                                 st.error(str(event.error))
                             elif event.type in {"response.output_text.done", "response.completed"}:
@@ -937,7 +941,7 @@ Answer:
                         if event.type == "content.delta":
                             answer_text += event.delta
                             placeholder.markdown(answer_text + "▌")
-                            time.sleep(0.1)
+                            time.sleep(0.08)
                         elif event.type == "content.done":
                             placeholder.markdown(answer_text)
 ## 
