@@ -11,3 +11,7 @@ demo/.ipynb_checkpoints/*
 demo2/
 demo/assets/.ipynb_checkpoints/*
 venv*
+*.db
+__pycache__/
+temp*
+
