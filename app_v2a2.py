@@ -9,7 +9,6 @@ import streamlit as st
 import pickle
 import os
 import openai
-
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import pycountry
 import time
@@ -34,6 +33,9 @@ import networkx as nx
 from langchain_core.retrievers import BaseRetriever
 from langchain.globals import set_llm_cache
 from langchain_community.cache import SQLiteCache
+import json
+import subprocess
+import yaml
 
 set_llm_cache(SQLiteCache(database_path=".cache.db"))
 
@@ -277,13 +279,29 @@ def build_upload_bundle(uploaded_files, client, embedding_model, dimension):
 
     return upload_db, text_meta, images
 
+def run_graphrag_cli(root_dir: str, input_dir: str, output_dir: str, api_key: str):
+    settings_path = Path(root_dir) / "settings.yaml"
+    env_path = Path(root_dir) / ".env"
+    
+    with open(env_path, "w") as f:
+        f.write(f"GRAPHRAG_API_KEY={api_key}\n")
+    
+    if not settings_path.exists():
+        subprocess.run(["graphrag", "init", "--root", str(root_dir)], check=True)
+    
+    result = subprocess.run(
+        ["graphrag", "index", "--root", str(root_dir)],
+        capture_output=True,
+        text=True
+    )
+    return result.returncode == 0
+
 class StaticGraphRetriever(BaseRetriever):
     def _get_relevant_documents(self, query, *, run_manager=None):
         return graph_docs
     async def _aget_relevant_documents(self, query, *, run_manager=None):
         return graph_docs                
     
-
 ################################
 # Globals / Config
 ################################
@@ -299,7 +317,6 @@ WORDS_PER_CHUNK_OVERLAP = int(TOKENS_PER_CHUNK / 5)  # ~10%
 top_k_textKBfaiss = 50
 top_k_textKBbm = 50
 top_k_addKBfaiss = 25
-top_k_textKBgraph = 25
 
 ################################
 # App UI
@@ -368,11 +385,11 @@ if option == "📚 Build a new Knowledge-Base":
         value='outputs/test_metadata.pkl',
         help="Path to save metadata for chunks"
     ))
-    st.session_state.graph_name = dequote_path(st.text_input(
-        "🕸️ Output Knowledge-Graph file path (.pkl)",
-        value='outputs/test_knowledge_graph.pkl',
-        help="Path to save the Knowledge-Graph"
-    ))    
+    st.session_state.graphrag = dequote_path(st.text_input(
+        "📁 Directory for GraphRAG",
+        value='outputs/graphrag',
+        help="Folder where the GraphRAG pipeline will save related artifacts"
+    ))
     if st.button("📚 Build Knowledge-Base"):
         if not os.path.isdir(st.session_state.pdf_folder):
             st.error("The provided folder path does not exist!")
@@ -381,19 +398,22 @@ if option == "📚 Build a new Knowledge-Base":
         if not pdf_files:
             st.error("No PDF files found in the selected folder!")
             st.stop()
-
+        ##
+        ## retrieving chunks, tokens
         total_chunks = 0
         total_tokens = 0
         total_cost = 0.0
         all_chunks = {}
+        all_texts = {} 
         st.write("🔍 Processing PDFs...")
         progress_bar = st.progress(0)
-
+        #
         for ipp, pdf_path in enumerate(pdf_files):
             try:
                 text = extract_text_from_pdf(pdf_path)
                 text = remove_junk_sections(text)
                 text = remove_junk_lines(text)
+                all_texts[pdf_path.name] = text
                 chunks = chunk_text2(text, max_tokens=TOKENS_PER_CHUNK, tokenizer=enc, overlap=WORDS_PER_CHUNK_OVERLAP)
                 token_count = sum(len(enc.encode(chunk)) for chunk in chunks)
                 cost_emb = estimate_embedding_cost(token_count, model=st.session_state.embedding_model)
@@ -406,16 +426,16 @@ if option == "📚 Build a new Knowledge-Base":
                 st.warning(f"⚠️ Failed on {pdf_path.name}: {e}")
             progress_percent = int((ipp + 1) / len(pdf_files) * 100)
             progress_bar.progress(progress_percent)
-
+        #
         st.write(f"📦 Total chunks: {total_chunks:,}, Total tokens: {total_tokens:,}!")
-
-        # Embedding + index
+        ## chunks, tokens -
+        ## index, metadata
         st.write("📌 Embedding and indexing...")
         all_embeddings = []
         all_metadata = []
         chunk_count = 0
         progress_bar = st.progress(0)
-
+        #
         for filename, chunks in all_chunks.items():
             for i, chunk in enumerate(chunks):
                 try:
@@ -433,7 +453,7 @@ if option == "📚 Build a new Knowledge-Base":
                 chunk_count += 1
                 progress = int((chunk_count / total_chunks) * 100)
                 progress_bar.progress(progress)
-
+        #
         embedding_matrix = np.array(all_embeddings, dtype="float32")
         st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
         index = faiss.IndexFlatL2(st.session_state.dimension)
@@ -443,12 +463,11 @@ if option == "📚 Build a new Knowledge-Base":
         faiss.write_index(index, st.session_state.knowledge_base_name)
         with open(st.session_state.metadata_name, "wb") as f:
             pickle.dump(all_metadata, f)
-
         st.success("✅ Knowledge-Base built and saved!")
         st.session_state.index = index
         st.session_state.metadata = all_metadata
-
-        # Build a FAISS wrapper for MMR
+        ## index, metadata -
+        ## db
         metadata = all_metadata
         ids = [str(i) for i in range(len(metadata))]
         docs_dict = {
@@ -471,66 +490,42 @@ if option == "📚 Build a new Knowledge-Base":
             index_to_docstore_id=index_to_docstore_id,
         )
         st.session_state.db = db
-        ##
-        # === NEW: keep a list of Documents and build BM25 over them ===
-        all_documents = list(docstore._dict.values())  # each value is a LangChain Document
+        ## db -
+        ## bm
+        all_documents = list(docstore._dict.values())  
         st.session_state.all_documents = all_documents
         st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
-        ##
-        ##
-        # === Build a Knowledge-Graph for GraphRAG ===
+        ## bm -
+        ## graphRAG
         try:
-            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-            transformer = LLMGraphTransformer(llm=llm)
-            # graph_docs = transformer.convert_to_graph_documents(all_documents)
-            ##
-            st.write("🧠 Extracting graph info from the documents...")                   
-            progress_bar = st.progress(0)
-            graph_docs = []
-            # Convert each document individually to show live progress
-            for idoc, doc in enumerate(all_documents):
-                gdocs = transformer.convert_to_graph_documents([doc])
-                graph_docs.extend(gdocs)
-                progress = int((idoc + 1) / len(all_documents) * 100)
-                progress_bar.progress(progress)
-
-            total_nodes = sum(len(doc.nodes) for doc in graph_docs)
-            total_edges = sum(len(doc.relationships) for doc in graph_docs)            
-            st.write(f"🧩 Extracted graph info → **Nodes:** {total_nodes:,}, **Edges:** {total_edges:,}!")
-            ##            
-            ##
-            graph = nx.Graph()             
-            st.write("🕸️ Forming Knowledge-Graph from extracted info...")                               
-            progress_bar = st.progress(0)  
-            for idoc, doc in enumerate(graph_docs):
-                for node in doc.nodes:
-                    graph.add_node(
-                        node.id, 
-                        type=node.type, 
-                        properties=node.properties
-                    )
-                for relation in doc.relationships:
-                    graph.add_edge(
-                        relation.source.id,
-                        relation.target.id,
-                        type=relation.type,
-                        properties=getattr(relation, 'properties', {}) 
-                    )
-                progress = int(((idoc+1) / len(graph_docs)) * 100)
-                progress_bar.progress(progress)                                        
-            graph_path = st.session_state.graph_name
-            with open(graph_path, "wb") as f:
-                pickle.dump(graph, f)
-            st.session_state.graph = graph
-            st.success(f"✅ Knowledge-Graph built and saved!")
+            ROOT_DIR = Path(st.session_state.graphrag)
+            INPUT_DIR = ROOT_DIR / "input"
+            OUTPUT_DIR = ROOT_DIR / "output"
+            os.makedirs(ROOT_DIR, exist_ok=True)        
+            os.makedirs(INPUT_DIR, exist_ok=True)
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+        
+            for fname, text in all_texts.items():
+                file_path = INPUT_DIR / f"{Path(fname).stem}.txt"
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+        
+            st.write("🚀 Running GraphRAG pipeline (this may take a while)...")
+            run_graphrag_cli(ROOT_DIR, INPUT_DIR, OUTPUT_DIR, api_key=st.session_state.api_key)
+            st.success(f"✅ GraphRAG pipeline completed!")
         except Exception as e:
-            st.warning(f"⚠️ Graph building failed: {e}")
-        ##
-        ##
+            st.warning(f"⚠️ GraphRAG build failed: {e}")
+        ## graphRAG -
+
 elif option == "📤 Load existing Knowledge-Base":
     index_path = st.text_input("🧠 Index file path (.index)", value='outputs/test_index.index')
     meta_path = st.text_input("📝 Metadata file path (.pkl)", value='outputs/test_metadata.pkl')
-    graph_path = st.text_input("🕸️ Knowledge-Graph file path (.pkl)", value='outputs/test_knowledge_graph.pkl')    
+    graphrag = st.text_input(
+        "🕸️ Directory for GraphRAG",
+        value='outputs/graphrag',
+        help="Folder where the GraphRAG pipeline saved related artifacts"
+    )
+
     if st.button("📤 Load Knowledge-Base"):
         if not os.path.isfile(index_path):
             st.error("Index file not found!")
@@ -539,6 +534,7 @@ elif option == "📤 Load existing Knowledge-Base":
             st.error("Metadata file not found!")
             st.stop()
         try:
+            ## index, metadata, db
             index = faiss.read_index(index_path)
             with open(meta_path, "rb") as f:
                 metadata = pickle.load(f)                
@@ -563,30 +559,27 @@ elif option == "📤 Load existing Knowledge-Base":
                 docstore=docstore,
                 index_to_docstore_id=index_to_docstore_id,
             )
-            st.session_state.db = db
-            ##
             st.session_state.embedding_model = metadata[0].get("embedding_model", "text-embedding-3-small")
             st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
             st.session_state.index = index
             st.session_state.metadata = metadata            
-            st.success(f"✅ Knowledge-Base loaded successfully! Embedding model: `{st.session_state.embedding_model}`")                        
-            ##
-            # === NEW: same as above for loaded KB ===
+            st.success(f"✅ Knowledge-Base loaded successfully! Embedding model: `{st.session_state.embedding_model}`")                                    
+            st.session_state.db = db
+            ## index, metadata, db -
+            # === loading for bm, graph ===
             all_documents = list(docstore._dict.values())
             st.session_state.all_documents = all_documents
             st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)            
-            ##
-            ##
-            if os.path.isfile(graph_path):
-                try:
-                    with open(graph_path, "rb") as f:
-                        st.session_state.graph = pickle.load(f)
-                    st.success(f"✅ Knowledge-Graph loaded successfully!")
-                except Exception as e:
-                    st.warning(f"⚠️ Failed to load Knowledge-Graph: {e}") 
+            #
+            required_files = ["entities.parquet", "relationships.parquet", "documents.parquet", "communities.parquet", "community_reports.parquet",]
+            missing = [f for f in required_files if not os.path.exists(Path(graphrag) / "output" / f)]
+            if missing:
+                st.warning(f"⚠️ GraphRAG directory is corrupted - missing critical files!")
             else:
-                st.info("No Knowledge-Graph found!")                
+                st.session_state.graphrag = graphrag                
+                st.success("✅ GraphRAG based Knowledge-Base loaded successfully!")
             ##
+            ## bm, grpah -
         except Exception as e:
             st.error(f"❌ Failed to load Knowledge-Base: {e}")
             st.stop()
@@ -594,20 +587,21 @@ elif option == "📤 Load existing Knowledge-Base":
 elif option == "➕ Append existing Knowledge-Base":
     exist_index_path = st.text_input("🧠 Existing index file path (.index)", value="outputs/test_index.index")
     exist_meta_path  = st.text_input("📝 Existing metadata file path (.pkl)", value="outputs/test_metadata.pkl")
-    exist_graph_path = st.text_input("🕸️ Existing Knowledge-Graph file path (.pkl)", value="outputs/test_knowledge_graph.pkl")
-
-    # New PDFs to append
+    graphrag = dequote_path(st.text_input(
+        "📁 Existing GraphRAG directory",
+        value="outputs/graphrag",
+        help="Folder where the GraphRAG pipeline stores its artifacts"
+    ))
     append_folder = dequote_path(st.text_input(
         "📁 Input Folder path for NEW PDFs to append:",
         value="inputs/new",
         help="Path to get the NEW PDFs to be appended"
     ))
-
-    # Output targets (write updated artifacts)
-    out_index_path = dequote_path(st.text_input("🧠 Output (updated) FAISS index file path (.index)", value="outputs/test_index_appended.index"))
-    out_meta_path  = dequote_path(st.text_input("📝 Output (updated) metadata file path (.pkl)", value="outputs/test_metadata_appended.pkl"))
-    out_graph_path = dequote_path(st.text_input("🕸️ Output (updated) Knowledge-Graph file path (.pkl)", value="outputs/test_knowledge_graph_appended.pkl"))
-
+    # out_index_path = dequote_path(st.text_input("🧠 Output (updated) FAISS index file path (.index)", value="outputs/test_index_appended.index"))
+    # out_meta_path  = dequote_path(st.text_input("📝 Output (updated) metadata file path (.pkl)", value="outputs/test_metadata_appended.pkl"))
+    out_index_path = exist_index_path
+    out_meta_path  = exist_meta_path
+    
     if st.button("➕ Append to Knowledge-Base"):
         # 0) Sanity checks
         if not os.path.isfile(exist_index_path):
@@ -616,38 +610,38 @@ elif option == "➕ Append existing Knowledge-Base":
             st.error("Existing metadata file not found!"); st.stop()
         if not os.path.isdir(append_folder):
             st.error("Append folder does not exist!"); st.stop()
-
-        # 1) Load existing artifacts
+        if not os.path.isdir(graphrag):
+            st.error("GraphRAG directory not found!"); st.stop()            
+        # 1) Collect NEW PDFs
+        pdf_files = list(Path(append_folder).glob("*.pdf"))
+        if not pdf_files:
+            st.warning("No PDFs found in the append folder!")
+            st.stop()            
+        # 2) Load existing artifacts
         try:
             index = faiss.read_index(exist_index_path)
             with open(exist_meta_path, "rb") as f:
                 metadata_existing = pickle.load(f)
         except Exception as e:
             st.error(f"❌ Failed to load existing Knowledge-Base: {e}"); st.stop()
-
-        # 1a) Verify embedding model compatibility
+        # 2a) Verify embedding model compatibility
         existing_model = metadata_existing[0].get("embedding_model", st.session_state.embedding_model)
         st.session_state.embedding_model = existing_model
         st.session_state.dimension = d_em2dim[st.session_state.embedding_model]
-
-        # 2) Collect NEW PDFs
-        pdf_files = list(Path(append_folder).glob("*.pdf"))
-        if not pdf_files:
-            st.warning("No PDFs found in the append folder!")
-            st.stop()
-
+        #
         # 3) Extract / clean / chunk new PDFs
         st.write("🔍 Processing NEW PDFs to append...")
         progress_bar = st.progress(0)
         new_chunks_by_file = {}
+        all_texts = {}
         total_new_chunks = 0
         total_new_tokens = 0
-
         for i, pdf_path in enumerate(pdf_files):
             try:
                 text = extract_text_from_pdf(pdf_path)
                 text = remove_junk_sections(text)
                 text = remove_junk_lines(text)
+                all_texts[pdf_path.name] = text
                 chunks = chunk_text2(text, max_tokens=TOKENS_PER_CHUNK, tokenizer=enc, overlap=WORDS_PER_CHUNK_OVERLAP)
                 token_count = sum(len(enc.encode(c)) for c in chunks)
                 new_chunks_by_file[pdf_path.name] = chunks
@@ -656,19 +650,16 @@ elif option == "➕ Append existing Knowledge-Base":
             except Exception as e:
                 st.warning(f"⚠️ Failed on {pdf_path.name}: {e}")
             progress_bar.progress(int((i+1)/len(pdf_files)*100))
-
         if total_new_chunks == 0:
             st.info("No new chunks were produced from the append PDFs."); st.stop()
-
         st.write(f"📦 New chunks: {total_new_chunks:,}, New tokens: {total_new_tokens:,}")
-
+        #
         # 4) Embed NEW chunks and append to FAISS
         st.write("📌 Embedding and appending to FAISS...")
         new_embeddings = []
         new_metadata = []
         count = 0
         progress_bar = st.progress(0)
-
         for filename, chunks in new_chunks_by_file.items():
             for j, chunk in enumerate(chunks):
                 try:
@@ -685,10 +676,9 @@ elif option == "➕ Append existing Knowledge-Base":
                     st.warning(f"⚠️ Embedding failed: {filename}, chunk {j} → {e}")
                 count += 1
                 progress_bar.progress(int(count / total_new_chunks * 100))
-
         if not new_embeddings:
             st.error("No new embeddings computed; aborting..."); st.stop()
-
+        #
         new_mat = np.array(new_embeddings, dtype="float32")
         try:
             # Ensure dimension matches
@@ -705,7 +695,7 @@ elif option == "➕ Append existing Knowledge-Base":
         faiss.write_index(index, out_index_path)
         with open(out_meta_path, "wb") as f:
             pickle.dump(updated_metadata, f)
-
+        #
         # 6) Rebuild LangChain FAISS wrapper + BM25 over all docs (existing + new)
         try:
             ids = [str(i) for i in range(len(updated_metadata))]
@@ -728,76 +718,37 @@ elif option == "➕ Append existing Knowledge-Base":
                 docstore=docstore,
                 index_to_docstore_id=index_to_docstore_id,
             )
+            st.session_state.index = index
+            st.session_state.metadata = updated_metadata            
             st.session_state.db = db
             all_documents = list(docstore._dict.values())
             st.session_state.all_documents = all_documents
             st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
         except Exception as e:
             st.warning(f"KB wrapper rebuild warning: {e}")
-
-        # 7) Append to Knowledge-Graph only with NEW docs
-        st.write("🕸️ Updating Knowledge-Graph with new info...")
-        try:
-            # Load existing graph (or start fresh)
-            if os.path.isfile(exist_graph_path):
-                with open(exist_graph_path, "rb") as f:
-                    graph = pickle.load(f)
-                if not isinstance(graph, nx.Graph):
-                    graph = nx.Graph(graph)
-            else:
-                graph = nx.Graph()
-
-            # Convert only NEW docs to graph docs
-            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-            transformer = LLMGraphTransformer(llm=llm)
-
-            # Create Document objects for NEW chunks only
-            new_doc_objs = []
-            for meta in new_metadata:
-                new_doc_objs.append(
-                    Document(
-                        page_content=meta["text"],
-                        metadata={
-                            "source": meta["source"], 
-                            "chunk_id": meta["chunk_id"],
-                            "original_content": meta.get("original_content", meta["text"]),
-                        }
-                    )
-                )
-
-            # Progress feedback
-            progress_bar = st.progress(0)
-            graph_docs = []
-            for i, d in enumerate(new_doc_objs):
-                gdocs = transformer.convert_to_graph_documents([d])
-                graph_docs.extend(gdocs)
-                progress_bar.progress(int((i+1)/max(1,len(new_doc_objs))*100))
-
-            # Add nodes/edges (light de-duplication happens naturally in NetworkX add)
-            for gdoc in graph_docs:
-                for node in gdoc.nodes:
-                    graph.add_node(node.id, type=node.type, properties=node.properties)
-                for rel in gdoc.relationships:
-                    graph.add_edge(
-                        rel.source.id, rel.target.id,
-                        type=rel.type,
-                        properties=getattr(rel, "properties", {})
-                    )
-
-            # Write updated graph to the chosen output
-            os.makedirs(os.path.dirname(out_graph_path), exist_ok=True)
-            with open(out_graph_path, "wb") as f:
-                pickle.dump(graph, f)
-            st.session_state.graph = graph
-
-        except Exception as e:
-            st.warning(f"⚠️ Graph append failed: {e}")
-
-        # 8) Persist in session_state and finalize
-        st.session_state.index = index
-        st.session_state.metadata = updated_metadata
-        st.success("✅ Append completed! Updated index/metadata/graph have been saved!")
             
+        ## graphRAG
+        st.write("🕸️ Updating GraphRAG with new documents...")
+        try:
+            ROOT_DIR = Path(graphrag)
+            INPUT_DIR = ROOT_DIR / "input"
+            OUTPUT_DIR = ROOT_DIR / "output"
+            os.makedirs(ROOT_DIR, exist_ok=True)            
+            os.makedirs(INPUT_DIR, exist_ok=True)
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+            for fname, text in all_texts.items():
+                file_path = INPUT_DIR / f"{Path(fname).stem}_append.txt"
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+
+            st.write("🚀 Updating GraphRAG...")
+            run_graphrag_cli(ROOT_DIR, INPUT_DIR, OUTPUT_DIR, api_key=st.session_state.api_key)
+            st.success("✅ GraphRAG updated successfully!")
+        except Exception as e:
+            st.warning(f"⚠️ GraphRAG update failed: {e}")
+        ## graphRAG -
+        st.success("✅ Append completed! Updated index/metadata/GraphRAG have been saved!")            
 
 st.divider()
 
@@ -806,11 +757,11 @@ st.header("❓ Ask a Question")
 st.session_state.gpt_model = st.selectbox(
     "🤖 Select model:",
     options=[
+        "gpt-4.1-2025-04-14",                
         "gpt-4o-2024-08-06",        
         "gpt-5",
         "gpt-5-thinking",
         "gpt-5-pro",
-        "gpt-4.1-2025-04-14",
         "o4-mini-2025-04-16",
         "o4-mini-deep-research-2025-06-26",
     ],
@@ -887,7 +838,6 @@ if "index" in st.session_state:
             ).data[0].embedding
             query_embedding = np.array(query_embedding, dtype="float32").reshape(1, -1)
             flat_emb = query_embedding[0].astype(float).tolist()
-            
             ##
             ##
             # results = st.session_state.db.max_marginal_relevance_search_by_vector(
@@ -909,35 +859,58 @@ if "index" in st.session_state:
                 llm=llm_expander,
                 include_original=True,
             ) 
-            cross_encoder = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
-            reranker = CrossEncoderReranker(model=cross_encoder)        
-            reranked_exapanded = ContextualCompressionRetriever(
-                base_retriever=multi_query,
-                base_compressor=reranker,
-            )        
-            ##
-            ##
+            # cross_encoder = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
+            # reranker = CrossEncoderReranker(model=cross_encoder, top_n=int(top_k_textKBfaiss+top_k_textKBbm))        
+            # reranked_exapanded = ContextualCompressionRetriever(
+            #     base_retriever=multi_query,
+            #     base_compressor=reranker,
+            # )        
             compressor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  
             compressor = LLMChainExtractor.from_llm(compressor_llm)    
+            # compressed_retriever = ContextualCompressionRetriever(
+            #     base_retriever=reranked_exapanded,
+            #     base_compressor=compressor,
+            # )        
             compressed_retriever = ContextualCompressionRetriever(
-                base_retriever=reranked_exapanded,
+                base_retriever=multi_query,
                 base_compressor=compressor,
-            )        
+            )                    
             results = compressed_retriever.invoke(query)
             reorder = LongContextReorder()
-            results = reorder.transform_documents(results)        
+            results = reorder.transform_documents(results) 
+            ##
             ## ==> till now (KB-text-faiss, KB-text-bm, KB-text-Engi)
             ## 
             results_up = []
             if use_uploads and st.session_state.get("upload_db") is not None:
-                results_up = st.session_state.upload_db.max_marginal_relevance_search_by_vector(
-                    embedding=flat_emb, k=top_k_addKBfaiss, fetch_k=top_k_addKBfaiss * 2, lambda_mult=1.0 - diversity
+                ##
+                # results_up = st.session_state.upload_db.max_marginal_relevance_search_by_vector(
+                #     embedding=flat_emb, k=top_k_addKBfaiss, fetch_k=top_k_addKBfaiss * 2, lambda_mult=1.0 - diversity
+                # )
+                #
+                vs_retriever_up = st.session_state.upload_db.as_retriever(
+                    search_type="mmr",
+                    search_kwargs={
+                        "k": top_k_addKBfaiss,
+                        "fetch_k": top_k_addKBfaiss * 2,
+                        "lambda_mult": 1.0 - diversity,
+                    },
                 )
-    
-            merged = results[:int((top_k_textKBfaiss+top_k_textKBbm)/10)]        
+                multi_query_up = MultiQueryRetriever.from_llm(
+                    retriever=vs_retriever_up,
+                    llm=llm_expander,
+                    include_original=True,
+                )
+                compressed_retriever_up = ContextualCompressionRetriever(
+                    base_retriever=multi_query_up,
+                    base_compressor=compressor,
+                )
+                results_up = compressed_retriever_up.invoke(query)
+                results_up = reorder.transform_documents(results_up)                
+                ##
+            merged = results        
             if results_up:
-                merged.extend(results_up[:int(top_k_addKBfaiss/5)])
-    
+                merged.extend(results_up)
             context_meta_chunks = [
                 f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.page_content}"
                 for doc in merged
@@ -945,105 +918,56 @@ if "index" in st.session_state:
             original_cmc = [
                 f"[{doc.metadata['source']} | chunk {doc.metadata['chunk_id']}]: {doc.metadata['original_content']}"
                 for doc in merged
-            ]        
-            
-            ## ==> till now (upload-text-faiss)
+            ]    
+            ## ==> till now (upload-text-faiss, upload-text-Engi)
             ##
             if use_uploads and st.session_state.get("upload_images"):
                 for img in st.session_state.upload_images[:]:
                     context_meta_chunks.append(f"[uploaded/{img['name']} | image]: (image attached)")  
                     original_cmc.append(f"[uploaded/{img['name']} | image]: (image attached)")  
-                    
-            ## ==> till now (upload-image)        
+            ## ==> till now (upload-image)
             ##
         ##
-        graph_context_chunks = []
-        query_lower = query.lower() # Prepare query for fuzzy search
-        if st.session_state.graph is not None:
-            try:
-                with st.spinner("🕸️ Searching relevant entities and relationships from Knowledge-Graph..."):            
-                    graph = st.session_state.graph
-                    related_nodes = set()
-                    # 1. Fuzzy Node Search: Find all nodes relevant to query terms
-                    for node_id, data in graph.nodes(data=True):
-                        searchable_text = str(node_id).lower() + " " + str(data.get('type', '')).lower() + " " + str(data.get('properties', {})).lower()
-                        if any(term in searchable_text for term in query_lower.split()):
-                            related_nodes.add(node_id)
-            
-                    # 2. Subgraph Traversal: Get 1-hop neighbors for all matched nodes
-                    all_context_nodes = set(related_nodes)
-                    for entity in related_nodes:
-                        neighbors = nx.single_source_shortest_path_length(graph, entity, cutoff=1).keys()
-                        all_context_nodes.update(neighbors)
-    
-                    # 3. Format Context into RAG Chunks (Triples and Node Data)
-                    for node in list(all_context_nodes):
-                        # Node info
-                        node_data = graph.nodes[node]
-                        node_type = node_data.get('type', '')
-                        node_props = node_data.get("properties", {})
-                        # Adjusted format to be slightly cleaner for the LLM
-                        # graph_context_chunks.append(f"Node: ({node}) | Type: {node_type} | Props: {node_props}")
-                        # graph_context_chunks.append(f"{node} - {node_type} | {node_props}")
-                        # graph_context_chunks.append(f"({node}) - [{node_type}]")
-    
-                        # Edge info (Triples)
-                        for target, edge_dict in graph[node].items():
-                            # Handle NetworkX Multi-DiGraph structure
-                            if isinstance(edge_dict, dict) and all(isinstance(v, dict) for v in edge_dict.values()):
-                                edge_data_list = edge_dict.values()
-                            else:
-                                edge_data_list = [edge_dict]
-                                
-                            # Crucial Fix: Only iterate over and process actual dictionaries.
-                            for data in edge_data_list:
-                                if isinstance(data, dict):
-                                    edge_type = data.get("type", "related to")
-                                    edge_props = data.get("properties", {})
-                                    
-                                    # Adjusted format for triples
-                                    graph_context_chunks.append(
-                                        # f"Triple: ({node}) -[{edge_type}]-> ({target}) | Edge Props: {edge_props}"
-                                        # f"{node} {edge_type} {target} | {edge_props}"                                    
-                                        f"{node} - {edge_type} - {target}"                                                                        
-                                    )
-    
-                if graph_context_chunks:
-                    st.info(f"🕸️ Found {len(graph_context_chunks)} related information (nodes/edges) from the Knowledge-Graph!")
-                    graph_docs = [
-                        Document(page_content=triple, metadata={"source": "knowledge_graph", "original_content": triple})
-                        for triple in graph_context_chunks
-                    ]
-                    static_graph_retriever = StaticGraphRetriever()                
-                    ce = HuggingFaceCrossEncoder(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
-                    rr = CrossEncoderReranker(model=ce, top_n=top_k_textKBgraph)
-                    compression_retriever = ContextualCompressionRetriever(
-                        base_compressor=rr,
-                        base_retriever=static_graph_retriever,
+        with st.spinner("Retrieving entities, relationships, and summaries from GraphRAG..."):        
+            # --- GraphRAG Query Integration ---
+            graph_context_chunks = []
+            graph_context = ""
+            original_gc = ""
+            if "graphrag" in st.session_state and os.path.isdir(st.session_state.graphrag):
+                try:
+                    ROOT_DIR = Path(st.session_state.graphrag)
+                    st.write("🕸️ Querying GraphRAG knowledge graph...")
+                    result = subprocess.run(
+                        [
+                            "graphrag", "query",
+                            "--root", str(ROOT_DIR),
+                            "--method", "global",
+                            "--query", query
+                        ],
+                        capture_output=True,
+                        text=True
                     )
-                    top_docs = compression_retriever.invoke(query)
-                    selected_sentences = [doc.page_content for doc in top_docs]
-                    # st.success(f"✅ Added top {len(selected_sentences)} graph triples to context.")
-                    st.success(f"✅ Context expansion done with additional information from Knowledge-Graph!")
-                    graph_context = (
-                        "\n[Knowledge-Graph Context]:\n"
-                        + "\n".join(f"- {s}" for s in selected_sentences)
-                    )
-                    context_meta_chunks.append(graph_context)
-                    ##
-                    original_ss = [doc.metadata['original_content'] for doc in top_docs]                    
-                    original_gc = (
-                        "\n[Knowledge-Graph Context]:\n"
-                        + "\n".join(f"- {s}" for s in original_ss)
-                    )
-                    original_cmc.append(original_gc)
-                    ##
-                    ## ==> till now (KB-text-graph) 
-                    ##
-            except Exception as e:
-                # Catch potential errors from NetworkX operations or graph structure
-                st.warning(f"⚠️ Graph context expansion failed: {e}")
-
+                    if result.returncode !=0:
+                        raise Exception(f"⚠️ GraphRAG query failed:\n{result.stderr.strip()}")
+                    answer = result.stdout.strip()
+                    if answer:
+                        # graph_context = (
+                        #     "\n[GraphRAG Context]:\n" +
+                        #     textwrap.shorten(answer, width=6000, placeholder=" ...")
+                        # )
+                        graph_context = (
+                            "\n[GraphRAG Context]:\n" + answer
+                        )                        
+                        context_meta_chunks.append(graph_context)
+                        original_cmc.append(graph_context)
+                        st.success("✅ GraphRAG context successfully retrieved and added!")
+                    else:
+                        st.info(f"⚠️ No GraphRAG response found for this query!")
+                except Exception as e:
+                    st.warning(f"⚠️ Error while retrieving from GraphRAG: {e}")
+            else:
+                st.info("ℹ️ No GraphRAG directory loaded - skipping graph-based retrieval.")
+            ## ==> till now (KB-text-graph) 
         ##
         context_meta = "\n\n".join(context_meta_chunks)
         original_cm = "\n\n".join(original_cmc)
