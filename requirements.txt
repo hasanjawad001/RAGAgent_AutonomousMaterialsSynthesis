@@ -1,5 +1,5 @@
-tiktoken==0.9.0
-openai==1.96.1
+tiktoken==0.11.0
+openai==1.99.9
 streamlit==1.47.0
 numpy>=1.24.0
 PyMuPDF==1.26.3
@@ -7,8 +7,11 @@ pycountry==24.6.1
 pandas==2.2.3
 openpyxl==3.1.5
 faiss-cpu==1.11.0.post1
+rank-bm25==0.2.2
 langchain==0.3.26
 langchain-core==0.3.68
 langchain-community==0.3.27
 langchain-text-splitters==0.3.8
 langchain-openai==0.3.7
+langchain-experimental==0.3.4
+graphrag==2.6.0
