@@ -476,48 +476,49 @@ if option == "📚 Build a new Knowledge-Base":
         st.session_state.all_documents = all_documents
         st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
         #
-        # Build a Knowledge-Graph for GraphRAG 
+        # Build a Knowledge-Graph...
+        st.write("🕸️ Building Knowledge-Graph...")                                        
         try:
             llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
             transformer = LLMGraphTransformer(llm=llm)
             # graph_docs = transformer.convert_to_graph_documents(all_documents)
-            st.write("🧠 Extracting graph info from the documents...")                   
-            progress_bar = st.progress(0)
-            graph_docs = []
-            # Convert each document individually to show live progress
-            for idoc, doc in enumerate(all_documents):
-                gdocs = transformer.convert_to_graph_documents([doc])
-                graph_docs.extend(gdocs)
-                progress = int((idoc + 1) / len(all_documents) * 100)
-                progress_bar.progress(progress)
-
-            total_nodes = sum(len(doc.nodes) for doc in graph_docs)
-            total_edges = sum(len(doc.relationships) for doc in graph_docs)            
+            with st.spinner("🧠 Extracting graph info from the documents..."):                   
+                progress_bar = st.progress(0)
+                graph_docs = []
+                # Convert each document individually to show live progress
+                for idoc, doc in enumerate(all_documents):
+                    gdocs = transformer.convert_to_graph_documents([doc])
+                    graph_docs.extend(gdocs)
+                    progress = int((idoc + 1) / len(all_documents) * 100)
+                    progress_bar.progress(progress)
+    
+                total_nodes = sum(len(doc.nodes) for doc in graph_docs)
+                total_edges = sum(len(doc.relationships) for doc in graph_docs)            
             st.write(f"🧩 Extracted graph info → **Nodes:** {total_nodes:,}, **Edges:** {total_edges:,}!")
             #
             graph = nx.Graph()             
-            st.write("🕸️ Forming Knowledge-Graph from extracted info...")                               
-            progress_bar = st.progress(0)  
-            for idoc, doc in enumerate(graph_docs):
-                for node in doc.nodes:
-                    graph.add_node(
-                        node.id, 
-                        type=node.type, 
-                        properties=node.properties
-                    )
-                for relation in doc.relationships:
-                    graph.add_edge(
-                        relation.source.id,
-                        relation.target.id,
-                        type=relation.type,
-                        properties=getattr(relation, 'properties', {}) 
-                    )
-                progress = int(((idoc+1) / len(graph_docs)) * 100)
-                progress_bar.progress(progress)                                        
-            graph_path = st.session_state.graph_name
-            with open(graph_path, "wb") as f:
-                pickle.dump(graph, f)
-            st.session_state.graph = graph
+            with st.spinner("🕸️ Forming Knowledge-Graph from extracted info..."):                               
+                progress_bar = st.progress(0)  
+                for idoc, doc in enumerate(graph_docs):
+                    for node in doc.nodes:
+                        graph.add_node(
+                            node.id, 
+                            type=node.type, 
+                            properties=node.properties
+                        )
+                    for relation in doc.relationships:
+                        graph.add_edge(
+                            relation.source.id,
+                            relation.target.id,
+                            type=relation.type,
+                            properties=getattr(relation, 'properties', {}) 
+                        )
+                    progress = int(((idoc+1) / len(graph_docs)) * 100)
+                    progress_bar.progress(progress)                                        
+                graph_path = st.session_state.graph_name
+                with open(graph_path, "wb") as f:
+                    pickle.dump(graph, f)
+                st.session_state.graph = graph
             st.success(f"✅ Knowledge-Graph built and saved!")
         except Exception as e:
             st.warning(f"⚠️ Graph building failed: {e}")
@@ -721,58 +722,58 @@ elif option == "➕ Append existing Knowledge-Base":
         except Exception as e:
             st.warning(f"KB wrapper rebuild warning: {e}")
         # 7) Append to Knowledge-Graph only with NEW docs
-        st.write("🕸️ Updating Knowledge-Graph with new info...")
-        try:
-            # Load existing graph (or start fresh)
-            if os.path.isfile(exist_graph_path):
-                with open(exist_graph_path, "rb") as f:
-                    graph = pickle.load(f)
-                if not isinstance(graph, nx.Graph):
-                    graph = nx.Graph(graph)
-            else:
-                graph = nx.Graph()
-            # Convert only NEW docs to graph docs
-            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-            transformer = LLMGraphTransformer(llm=llm)
-            # Create Document objects for NEW chunks only
-            new_doc_objs = []
-            for meta in new_metadata:
-                new_doc_objs.append(
-                    Document(
-                        page_content=meta["text"],
-                        metadata={
-                            "source": meta["source"], 
-                            "chunk_id": meta["chunk_id"],
-                            "original_content": meta.get("original_content", meta["text"]),
-                        }
+        with st.spinner("🕸️ Updating Knowledge-Graph with new info..."):
+            try:
+                # Load existing graph (or start fresh)
+                if os.path.isfile(exist_graph_path):
+                    with open(exist_graph_path, "rb") as f:
+                        graph = pickle.load(f)
+                    if not isinstance(graph, nx.Graph):
+                        graph = nx.Graph(graph)
+                else:
+                    graph = nx.Graph()
+                # Convert only NEW docs to graph docs
+                llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+                transformer = LLMGraphTransformer(llm=llm)
+                # Create Document objects for NEW chunks only
+                new_doc_objs = []
+                for meta in new_metadata:
+                    new_doc_objs.append(
+                        Document(
+                            page_content=meta["text"],
+                            metadata={
+                                "source": meta["source"], 
+                                "chunk_id": meta["chunk_id"],
+                                "original_content": meta.get("original_content", meta["text"]),
+                            }
+                        )
                     )
-                )
-            # Progress feedback
-            progress_bar = st.progress(0)
-            graph_docs = []
-            for i, d in enumerate(new_doc_objs):
-                gdocs = transformer.convert_to_graph_documents([d])
-                graph_docs.extend(gdocs)
-                progress_bar.progress(int((i+1)/max(1,len(new_doc_objs))*100))
-            # Add nodes/edges (light de-duplication happens naturally in NetworkX add)
-            for gdoc in graph_docs:
-                for node in gdoc.nodes:
-                    graph.add_node(node.id, type=node.type, properties=node.properties)
-                for rel in gdoc.relationships:
-                    graph.add_edge(
-                        rel.source.id, rel.target.id,
-                        type=rel.type,
-                        properties=getattr(rel, "properties", {})
-                    )
-            # Write updated graph to the chosen output
-            os.makedirs(os.path.dirname(out_graph_path), exist_ok=True)
-            with open(out_graph_path, "wb") as f:
-                pickle.dump(graph, f)
-            st.session_state.graph = graph
-        except Exception as e:
-            st.warning(f"⚠️ Graph append failed: {e}")
+                # Progress feedback
+                progress_bar = st.progress(0)
+                graph_docs = []
+                for i, d in enumerate(new_doc_objs):
+                    gdocs = transformer.convert_to_graph_documents([d])
+                    graph_docs.extend(gdocs)
+                    progress_bar.progress(int((i+1)/max(1,len(new_doc_objs))*100))
+                # Add nodes/edges (light de-duplication happens naturally in NetworkX add)
+                for gdoc in graph_docs:
+                    for node in gdoc.nodes:
+                        graph.add_node(node.id, type=node.type, properties=node.properties)
+                    for rel in gdoc.relationships:
+                        graph.add_edge(
+                            rel.source.id, rel.target.id,
+                            type=rel.type,
+                            properties=getattr(rel, "properties", {})
+                        )
+                # Write updated graph to the chosen output
+                os.makedirs(os.path.dirname(out_graph_path), exist_ok=True)
+                with open(out_graph_path, "wb") as f:
+                    pickle.dump(graph, f)
+                st.session_state.graph = graph
+            except Exception as e:
+                st.warning(f"⚠️ Graph append failed: {e}")
         # 8) Persist in session_state and finalize
-        st.success("✅ Append completed! Updated index/metadata/graph have been saved!")
+        st.success("✅ Append completed! Updated Index/Metadata/Graph have been saved!")
             
 
 st.divider()
@@ -855,8 +856,8 @@ if "index" in st.session_state:
                 st.caption(f"Uploads ready: {len(st.session_state.get('upload_meta', []))} text chunks, "
                            f"{len(st.session_state.get('upload_images', []))} images!")
 
-        # 2) retrieve context (KB + optional uploads) via MMR
-        with st.spinner("🔍 Retrieving relevant context from Knowledge-Base..."):        
+        # 2) retrieve context (KB + optional uploads) via MMR   
+        with st.spinner("🔍 Knowledge-Base: Retrieving relevant context ..."):              
             query_embedding = client.embeddings.create(
                 input=query,
                 model=st.session_state.embedding_model
@@ -956,11 +957,11 @@ if "index" in st.session_state:
         graph_context_chunks = []
         if st.session_state.graph is not None:
             try:
-                with st.spinner("🕸️ Searching relevant entities and relationships from Knowledge-Graph..."):
+                with st.spinner("🕸️ Knowledge-Graph: Retrieving entities, relationships..."):                     
                     ##
                     query_lower = query.lower() # Prepare query for fuzzy search
                     if len(query.split()) > 50:  # arbitrary threshold
-                        st.info("🧩 Query is long - summarizing before Knowledge-Graph search...")
+                        # st.info("🧩 Query is long - summarizing before Knowledge-Graph search...")
                         llm_summary = ChatOpenAI(model="gpt-4o-mini", temperature=0)
                         summary_prompt = f"Summarize the following long query into 10-20 key search terms or short phrases. Query:\n\n{query}\n\nKey terms:"
                         try:
