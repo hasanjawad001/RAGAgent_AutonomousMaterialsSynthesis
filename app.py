@@ -388,9 +388,9 @@ if option == "📚 Build a new Knowledge-Base":
         help="Path to save metadata for chunks"
     ))
     st.session_state.graphrag = dequote_path(st.text_input(
-        "📁 Directory for GraphRAG",
+        "📁 Directory for Knowledge-Graph",
         value='outputs/graphrag',
-        help="Folder where the GraphRAG pipeline will save related artifacts"
+        help="Folder where the Knowledge-Graph pipeline will save related artifacts"
     ))
     if st.button("📚 Build Knowledge-Base"):
         if not os.path.isdir(st.session_state.pdf_folder):
@@ -511,21 +511,22 @@ if option == "📚 Build a new Knowledge-Base":
                 file_path = INPUT_DIR / f"{Path(fname).stem}.txt"
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(text)
-        
-            st.write("🚀 Running GraphRAG pipeline (this may take a while depending on your Knowledge-Base size)...")
-            run_graphrag_cli(ROOT_DIR, INPUT_DIR, OUTPUT_DIR, api_key=st.session_state.api_key)
-            st.success(f"✅ GraphRAG pipeline completed!")
+
+            st.write("🕸️ Building Knowledge-Graph...")            
+            with st.spinner("🚀 Running Knowledge-Graph pipeline (this may take a while depending on your Knowledge-Base size)..."):            
+                run_graphrag_cli(ROOT_DIR, INPUT_DIR, OUTPUT_DIR, api_key=st.session_state.api_key)
+            st.success(f"✅ Knowledge-Graph pipeline completed!")
         except Exception as e:
-            st.warning(f"⚠️ GraphRAG build failed: {e}")
+            st.warning(f"⚠️ Knowledge-Graph build failed: {e}")
         ## graphRAG -
 
 elif option == "📤 Load existing Knowledge-Base":
     index_path = st.text_input("🧠 Index file path (.index)", value='outputs/test_index.index')
     meta_path = st.text_input("📝 Metadata file path (.pkl)", value='outputs/test_metadata.pkl')
     graphrag = st.text_input(
-        "🕸️ Directory for GraphRAG",
+        "🕸️ Directory for Knowledge-Graph",
         value='outputs/graphrag',
-        help="Folder where the GraphRAG pipeline saved related artifacts"
+        help="Folder where the Knowledge-Graph pipeline saved related artifacts"
     )
 
     if st.button("📤 Load Knowledge-Base"):
@@ -576,10 +577,10 @@ elif option == "📤 Load existing Knowledge-Base":
             required_files = ["entities.parquet", "relationships.parquet", "documents.parquet", "communities.parquet", "community_reports.parquet",]
             missing = [f for f in required_files if not os.path.exists(Path(graphrag) / "output" / f)]
             if missing:
-                st.warning(f"⚠️ GraphRAG directory is corrupted - missing critical files!")
+                st.warning(f"⚠️ Knowledge-Graph directory is corrupted - missing critical files!")
             else:
                 st.session_state.graphrag = graphrag                
-                st.success("✅ GraphRAG based Knowledge-Base loaded successfully!")
+                st.success("✅ Knowledge-Graph loaded successfully!")
             ##
             ## bm, grpah -
         except Exception as e:
@@ -590,9 +591,9 @@ elif option == "➕ Append existing Knowledge-Base":
     exist_index_path = st.text_input("🧠 Existing index file path (.index)", value="outputs/test_index.index")
     exist_meta_path  = st.text_input("📝 Existing metadata file path (.pkl)", value="outputs/test_metadata.pkl")
     graphrag = dequote_path(st.text_input(
-        "📁 Existing GraphRAG directory",
+        "📁 Existing Knowledge-Graph directory",
         value="outputs/graphrag",
-        help="Folder where the GraphRAG pipeline stores its artifacts"
+        help="Folder where the Knowledge-Graph pipeline stores its artifacts"
     ))
     append_folder = dequote_path(st.text_input(
         "📁 Input Folder path for NEW PDFs to append:",
@@ -613,7 +614,7 @@ elif option == "➕ Append existing Knowledge-Base":
         if not os.path.isdir(append_folder):
             st.error("Append folder does not exist!"); st.stop()
         if not os.path.isdir(graphrag):
-            st.error("GraphRAG directory not found!"); st.stop()            
+            st.error("Knowledge-Graph directory not found!"); st.stop()            
         # 1) Collect NEW PDFs
         pdf_files = list(Path(append_folder).glob("*.pdf"))
         if not pdf_files:
@@ -730,28 +731,27 @@ elif option == "➕ Append existing Knowledge-Base":
             st.warning(f"KB wrapper rebuild warning: {e}")
             
         ## graphRAG
-        st.write("🕸️ Updating GraphRAG with new documents...")
-        try:
-            ROOT_DIR = Path(graphrag)
-            INPUT_DIR = ROOT_DIR / "input"
-            OUTPUT_DIR = ROOT_DIR / "output"
-            os.makedirs(ROOT_DIR, exist_ok=True)            
-            os.makedirs(INPUT_DIR, exist_ok=True)
-            os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-            for fname, text in all_texts.items():
-                file_path = INPUT_DIR / f"{Path(fname).stem}_append.txt"
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(text)
-
-            st.write("🚀 Updating GraphRAG...")
-            run_graphrag_cli(ROOT_DIR, INPUT_DIR, OUTPUT_DIR, api_key=st.session_state.api_key)
-            st.session_state.graphrag  = graphrag          
-            st.success("✅ GraphRAG updated successfully!")
-        except Exception as e:
-            st.warning(f"⚠️ GraphRAG update failed: {e}")
+        with st.spinner("🕸️ Updating Knowledge-Graph with new documents..."):
+            try:
+                ROOT_DIR = Path(graphrag)
+                INPUT_DIR = ROOT_DIR / "input"
+                OUTPUT_DIR = ROOT_DIR / "output"
+                os.makedirs(ROOT_DIR, exist_ok=True)            
+                os.makedirs(INPUT_DIR, exist_ok=True)
+                os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+                for fname, text in all_texts.items():
+                    file_path = INPUT_DIR / f"{Path(fname).stem}_append.txt"
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(text)
+    
+                run_graphrag_cli(ROOT_DIR, INPUT_DIR, OUTPUT_DIR, api_key=st.session_state.api_key)
+                st.session_state.graphrag  = graphrag          
+                st.success("✅ Knowledge-Graph updated successfully!")
+            except Exception as e:
+                st.warning(f"⚠️ Knowledge-Graph update failed: {e}")
         ## graphRAG -
-        st.success("✅ Append completed! Updated index/metadata/GraphRAG have been saved!")            
+        st.success("✅ Append completed! Updated Index/Metadata/Graph have been saved!")            
 
 st.divider()
 
@@ -834,7 +834,7 @@ if "index" in st.session_state:
                            f"{len(st.session_state.get('upload_images', []))} images!")
 
         # 2) retrieve context (KB + optional uploads) via MMR
-        with st.spinner("🔍 Retrieving relevant context from Knowledge-Base..."):        
+        with st.spinner("🔍 Knowledge-Base: Retrieving relevant context ..."):        
             query_embedding = client.embeddings.create(
                 input=query,
                 model=st.session_state.embedding_model
@@ -931,15 +931,13 @@ if "index" in st.session_state:
             ## ==> till now (upload-image)
             ##
         ##
-        with st.spinner("Retrieving entities, relationships, and summaries from GraphRAG..."):        
-            # --- GraphRAG Query Integration ---
+        with st.spinner("Knowledge-Graph: Retrieving entities, relationships, and summaries..."):        
             graph_context_chunks = []
             graph_context = ""
             original_gc = ""
             if "graphrag" in st.session_state and os.path.isdir(st.session_state.graphrag):
                 try:
                     ROOT_DIR = Path(st.session_state.graphrag)
-                    st.write("🕸️ Querying GraphRAG knowledge graph...")
                     result = subprocess.run(
                         [
                             "graphrag", "query",
@@ -951,7 +949,7 @@ if "index" in st.session_state:
                         text=True
                     )
                     if result.returncode !=0:
-                        raise Exception(f"⚠️ GraphRAG query failed:\n{result.stderr.strip()}")
+                        raise Exception(f"⚠️ Knowledge-Graph query failed:\n{result.stderr.strip()}")
                     answer = result.stdout.strip()
                     if answer:
                         # graph_context = (
@@ -959,17 +957,17 @@ if "index" in st.session_state:
                         #     textwrap.shorten(answer, width=6000, placeholder=" ...")
                         # )
                         graph_context = (
-                            "\n[GraphRAG Context]:\n" + answer
+                            "\n[Knowledge-Graph Context]:\n" + answer
                         )                        
                         context_meta_chunks.append(graph_context)
                         original_cmc.append(graph_context)
-                        st.success("✅ GraphRAG context successfully retrieved and added!")
+                        st.success("✅ Knowledge-Graph context successfully retrieved and added!")
                     else:
-                        st.info(f"⚠️ No GraphRAG response found for this query!")
+                        st.info(f"⚠️ No Knowledge-Graph response found for this query!")
                 except Exception as e:
-                    st.warning(f"⚠️ Error while retrieving from GraphRAG: {e}")
+                    st.warning(f"⚠️ Error while retrieving from Knowledge-Graph: {e}")
             else:
-                st.info("ℹ️ No GraphRAG directory loaded - skipping graph-based retrieval.")
+                st.info("ℹ️ No Knowledge-Graph directory loaded - skipping graph-based retrieval.")
             ## ==> till now (KB-text-graph) 
         ##
         context_meta = "\n\n".join(context_meta_chunks)
