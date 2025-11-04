@@ -293,11 +293,12 @@ d_em2dim = {
     "text-embedding-3-large": 3072
 }
 TOKENS_PER_CHUNK = 300
-WORDS_PER_CHUNK_OVERLAP = int(TOKENS_PER_CHUNK / 5)  # ~10%
+WORDS_PER_CHUNK_OVERLAP = int(TOKENS_PER_CHUNK / 5)  # ~20%
 top_k_textKBfaiss = 50
 top_k_textKBbm = 50
 top_k_addKBfaiss = 25
 top_k_textKBgraph = 25
+stream_delay = 0.08
 
 ################################
 # App UI
@@ -961,15 +962,15 @@ if "index" in st.session_state:
                     if len(query.split()) > 50:  # arbitrary threshold
                         st.info("🧩 Query is long - summarizing before Knowledge-Graph search...")
                         llm_summary = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-                        summary_prompt = f"Summarize the following long query into 10-20 key search terms or short phrases:\n\n{query}\n\nKey terms:"
+                        summary_prompt = f"Summarize the following long query into 10-20 key search terms or short phrases. Query:\n\n{query}\n\nKey terms:"
                         try:
                             summary_resp = llm_summary.invoke(summary_prompt)
                             summarized_query = summary_resp.content.strip().lower()
                             query_terms = summarized_query.split()
                             st.caption(f"🔍 Using condensed search terms: {', '.join(query_terms)}...")
                         except Exception as e:
+                            query_terms = query_lower.split()                            
                             st.warning(f"⚠️ Summarization failed, using full query: {e}")
-                            query_terms = query_lower.split()
                     else:
                         query_terms = query_lower.split()
                     ##
@@ -1122,7 +1123,7 @@ Answer:
                         if event.type == "response.output_text.delta":
                             answer_text += event.delta
                             placeholder.markdown(answer_text + "▌")
-                            time.sleep(0.08)  
+                            time.sleep(stream_delay)  
                         elif event.type == "response.error":
                             st.error(str(event.error))
                         elif event.type in {"response.output_text.done", "response.completed"}:
@@ -1141,7 +1142,7 @@ Answer:
                         if event.type == "content.delta":
                             answer_text += event.delta
                             placeholder.markdown(answer_text + "▌")
-                            time.sleep(0.08)
+                            time.sleep(stream_delay)
                         elif event.type == "content.done":
                             placeholder.markdown(answer_text)
             
@@ -1156,7 +1157,7 @@ Answer:
                             if event.type == "response.output_text.delta":
                                 answer_text += event.delta
                                 placeholder.markdown(answer_text + "▌")
-                                time.sleep(0.08)
+                                time.sleep(stream_delay)
                             elif event.type == "response.error":
                                 st.error(str(event.error))
                             elif event.type in {"response.output_text.done", "response.completed"}:
@@ -1178,7 +1179,7 @@ Answer:
                         if event.type == "content.delta":
                             answer_text += event.delta
                             placeholder.markdown(answer_text + "▌")
-                            time.sleep(0.08)
+                            time.sleep(stream_delay)
                         elif event.type == "content.done":
                             placeholder.markdown(answer_text)
 ## 
