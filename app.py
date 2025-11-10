@@ -20,6 +20,7 @@ import pandas as pd
 import io
 import base64
 import mimetypes
+from docx import Document as DocxDocument
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever, MultiQueryRetriever
 from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
@@ -817,6 +818,9 @@ with st.expander("🎛️ Advanced Controls: Diversity & Creativity"):
         temperature = 0.3
 
 if "index" in st.session_state:
+    for key in ["last_query", "last_answer", "context_meta"]:
+        if key not in st.session_state:
+            st.session_state[key] = ""
     query = st.text_area("Ask your question here:", height=280, placeholder="Type your question...")
 
     # Uploads UI kept from the extended app
@@ -828,7 +832,16 @@ if "index" in st.session_state:
     )
     use_uploads = True
 
-    if st.button("💬 Answer") and query:
+    ## Answer
+    # if st.button("💬 Answer") and query:
+    col1, col2, col3 = st.columns([1, 2, 1])     
+    with col1:
+        answer_clicked = st.button("💬 Answer", use_container_width=True)
+    with col3:
+        save_clicked = st.button("💾 Save last Q&A", use_container_width=True)        
+    st.markdown("")        
+    if answer_clicked and query:
+    ##    
         # 1) process uploads (text + images), cache for reuse
         with st.spinner("📂 Processing uploaded files..."):        
             if uploaded_files:
@@ -1184,13 +1197,51 @@ Answer:
                         elif event.type == "content.done":
                             placeholder.markdown(answer_text)
 ## 
-            with st.expander("📚 Retrieved Context for this Query"):
-                context_meta_html = original_cm.replace("\n", "<br>")
-                # context_meta_html = context_meta.replace("\n", "<br>")                
-                st.markdown(f"<div style='overflow-wrap: break-word; width: 600px'>{context_meta_html}</div>", unsafe_allow_html=True)
-
+            # with st.expander("📚 Retrieved Context for this Query"):
+            #     context_meta_html = original_cm.replace("\n", "<br>")
+            #     # context_meta_html = context_meta.replace("\n", "<br>")                
+            #     st.markdown(f"<div style='overflow-wrap: break-word; width: 600px'>{context_meta_html}</div>", unsafe_allow_html=True)
+           ##
+            st.session_state.last_query = query
+            st.session_state.last_answer = answer_text
+            st.session_state.context_meta = original_cm          
+            # st.session_state.context_meta = context_meta                    
+            ##
+        
         except Exception as e:
             st.error(f"❌ Inference failed: {e}")
+
+    ##
+    ## save
+    if save_clicked and st.session_state.last_answer:
+        try:
+            save_path = Path("outputs/qa_pairs.docx")
+            if save_path.exists():
+                doc = DocxDocument(save_path)
+            else:
+                doc = DocxDocument()
+                doc.add_heading("Question–Answer Log", level=1)
+                doc.add_paragraph("")
+
+            doc.add_heading("Question:", level=2)
+            doc.add_paragraph(st.session_state.last_query.strip())
+            doc.add_heading("Answer:", level=2)
+            doc.add_paragraph(st.session_state.last_answer.strip())
+            doc.add_paragraph("")  # spacing
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            doc.save(save_path)
+            st.success(f"✅ Q&A pair added to: {save_path}")
+        except Exception as e:
+            st.error(f"❌ Saving Q&A pair failed: {e}")
+    ##
+
+    ## retrieved context
+    if st.session_state.context_meta:
+        st.divider()
+        with st.expander("📚 Retrieved Context for this Query"):
+            context_meta_html = st.session_state.context_meta.replace("\n", "<br>")            
+            st.markdown(f"<div style='overflow-wrap: break-word; width: 600px'>{context_meta_html}</div>", unsafe_allow_html=True)
+    ##        
 
 else:
     st.info("⚠️ Please build or load a Knowledge-Base before asking a question!")
