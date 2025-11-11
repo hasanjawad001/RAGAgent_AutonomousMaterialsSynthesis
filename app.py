@@ -1071,11 +1071,15 @@ if "index" in st.session_state:
                     )
                     context_meta_chunks.append(graph_context)
                     ##
-                    original_ss = [doc.metadata['original_content'] for doc in top_docs]                    
+                    # original_ss = [doc.metadata['original_content'] for doc in top_docs]                    
+                    # original_gc = (
+                    #     "\n[Knowledge-Graph Context]:\n"
+                    #     + "\n".join(f"- {s}" for s in original_ss)
+                    # )
                     original_gc = (
                         "\n[Knowledge-Graph Context]:\n"
-                        + "\n".join(f"- {s}" for s in original_ss)
-                    )
+                        + "\n" + merged_graph_text
+                    )                                                            
                     original_cmc.append(original_gc)
                     ##
                     ## ==> till now (KB-text-graph, KB-text-Engi) 
