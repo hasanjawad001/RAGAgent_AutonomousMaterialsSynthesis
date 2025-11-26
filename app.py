@@ -22,7 +22,7 @@ import base64
 import mimetypes
 from docx import Document as DocxDocument
 from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers import EnsembleRetriever, MultiQueryRetriever
+from langchain.retrievers import EnsembleRetriever, MultiQueryRetriever, WeightedFusionRetriever
 from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import LLMChainExtractor
 from langchain.retrievers.document_compressors import CrossEncoderReranker
@@ -891,7 +891,12 @@ if "index" in st.session_state:
                 },
             )
             bm25 = st.session_state.bm25
-            hybrid = EnsembleRetriever(retrievers=[vs_retriever, bm25])
+            # hybrid = EnsembleRetriever(retrievers=[vs_retriever, bm25])
+            hybrid = WeightedFusionRetriever.from_retrievers(
+                retrievers=[vs_retriever, bm25],
+                weights=[0.5, 0.5],
+                fusion_algorithm="rrf",
+            )
             llm_expander = ChatOpenAI(model="gpt-4o-mini")
             multi_query = MultiQueryRetriever.from_llm(
                 retriever=hybrid,
