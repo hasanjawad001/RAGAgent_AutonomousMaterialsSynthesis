@@ -560,9 +560,9 @@ if option == "📚 Build a new Knowledge-Base":
 elif option == "📤 Load existing Knowledge-Base":
     index_path = st.text_input("🧠 Index file path (.index)", value='outputs/test_index.index')
     meta_path = st.text_input("📝 Metadata file path (.pkl)", value='outputs/test_metadata.pkl')
-    graphrag = st.text_input(
+    knowledge_graph = st.text_input(
         "🕸️ Directory for Knowledge-Graph",
-        value='outputs/graphrag',
+        value='outputs/knowledge_graph',
         help="Folder where the Knowledge-Graph pipeline saved related artifacts"
     )
 
@@ -611,13 +611,26 @@ elif option == "📤 Load existing Knowledge-Base":
             st.session_state.all_documents = all_documents
             st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)            
             #
-            required_files = ["entities.parquet", "relationships.parquet", "documents.parquet", "communities.parquet", "community_reports.parquet",]
-            missing = [f for f in required_files if not os.path.exists(Path(graphrag) / "output" / f)]
+            kg_dir = Path(knowledge_graph)
+            required_files = [
+                "graph_chunk_entity_relation.graphml", 
+                "kv_store_doc_status.json", "kv_store_full_entities.json", "kv_store_full_relations.json", 
+                "kv_store_full_docs.json", "kv_store_text_chunks.json", "kv_store_entity_chunks.json", "kv_store_relation_chunks.json", 
+                "vdb_entities.json", "vdb_relationships.json", "vdb_chunks.json",
+            ]
+            missing = [f for f in required_files if not (kg_dir / f).exists()]
+            
             if missing:
-                st.warning(f"⚠️ Knowledge-Graph directory is corrupted - missing critical files!")
+                st.warning(f"⚠️ Knowledge-Graph is incomplete or corrupted.\nMissing: {missing}")
             else:
-                st.session_state.graphrag = graphrag                
+                st.session_state.knowledge_graph = knowledge_graph                
                 st.success("✅ Knowledge-Graph loaded successfully!")
+            st.session_state.lightrag_engine = get_lightrag_engine(
+                working_dir=st.session_state.get("knowledge_graph", "outputs/knowledge_graph"),
+                api_key=st.session_state.api_key,
+                embedding_model=st.session_state.embedding_model,
+                embedding_dim=st.session_state.dimension,
+            )
             ##
             ## bm, grpah -
         except Exception as e:
