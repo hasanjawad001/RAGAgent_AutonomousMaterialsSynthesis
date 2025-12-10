@@ -37,8 +37,34 @@ from langchain_community.cache import SQLiteCache
 import json
 import subprocess
 import yaml
+from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import gpt_4o_mini_complete, gpt_4o_complete, openai_embed
+from lightrag.utils import EmbeddingFunc
+import asyncio
+from lightrag.kg.shared_storage import initialize_pipeline_status
+
+
+################################
+# Globals / Config
+################################
 
 set_llm_cache(SQLiteCache(database_path=".cache.db"))
+st.set_page_config(page_title="RAG Agent", layout="centered")
+
+enc = tiktoken.get_encoding("cl100k_base")
+
+d_em2dim = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072
+}
+TOKENS_PER_CHUNK = 300
+WORDS_PER_CHUNK_OVERLAP = int(TOKENS_PER_CHUNK / 5)  # ~20%
+top_k_textKBfaiss = 50
+top_k_textKBbm = 50
+top_k_addKBfaiss = 25
+top_k_textKBgraph = 25
+stream_delay = 0.08
+
 
 ################################
 # Helpers 
@@ -280,47 +306,48 @@ def build_upload_bundle(uploaded_files, client, embedding_model, dimension):
 
     return upload_db, text_meta, images
 
-def run_graphrag_cli(root_dir: str, input_dir: str, output_dir: str, api_key: str):
-    settings_path = Path(root_dir) / "settings.yaml"
-    env_path = Path(root_dir) / ".env"
-    
-    with open(env_path, "w") as f:
-        f.write(f"GRAPHRAG_API_KEY={api_key}\n")
-    
-    if not settings_path.exists():
-        subprocess.run(["graphrag", "init", "--root", str(root_dir)], check=True)
-    
-    result = subprocess.run(
-        ["graphrag", "index", "--root", str(root_dir)],
-        capture_output=True,
-        text=True
-    )
-    return result.returncode == 0
+@st.cache_resource
+def get_lightrag_engine(working_dir, api_key, embedding_model, embedding_dim):
+    """
+    Initializes and caches the LightRAG engine.
+    """
+    if not os.path.exists(working_dir):
+        os.makedirs(working_dir)
+        
+    rag = LightRAG(
+        working_dir=working_dir,
+        # LLM Function: Pass the API key to the LLM utility function
+        llm_model_func=lambda prompt, system_prompt=None, history_messages=[], **kwargs: gpt_4o_mini_complete(
+            prompt, 
+            system_prompt=system_prompt, 
+            history_messages=history_messages, 
+            api_key=api_key, # <-- API Key passed here
+            **kwargs
+        ),
+        
+        # Embedding Function: Pass the API key AND the chosen model name
+        embedding_func=EmbeddingFunc(
+            embedding_dim=embedding_dim, 
+            max_token_size=8192,
+            # Use lambda to inject the user's chosen model and API key
+            func=lambda texts: openai_embed(
+                texts, 
+                model=embedding_model, # <-- Chosen model name passed here
+                api_key=api_key         # <-- API Key passed here
+            ) 
+        ),
+        
+        llm_model_name="gpt-4o-mini",
+    )    
+    return rag
 
 class StaticGraphRetriever(BaseRetriever):
     def _get_relevant_documents(self, query, *, run_manager=None):
         return graph_docs
     async def _aget_relevant_documents(self, query, *, run_manager=None):
         return graph_docs                
+
     
-################################
-# Globals / Config
-################################
-
-enc = tiktoken.get_encoding("cl100k_base")
-
-d_em2dim = {
-    "text-embedding-3-small": 1536,
-    "text-embedding-3-large": 3072
-}
-TOKENS_PER_CHUNK = 300
-WORDS_PER_CHUNK_OVERLAP = int(TOKENS_PER_CHUNK / 5)  # ~20%
-top_k_textKBfaiss = 50
-top_k_textKBbm = 50
-top_k_addKBfaiss = 25
-top_k_textKBgraph = 25
-stream_delay = 0.08
-
 ################################
 # App UI
 ################################
@@ -388,9 +415,9 @@ if option == "📚 Build a new Knowledge-Base":
         value='outputs/test_metadata.pkl',
         help="Path to save metadata for chunks"
     ))
-    st.session_state.graphrag = dequote_path(st.text_input(
+    st.session_state.knowledge_graph = dequote_path(st.text_input(
         "📁 Directory for Knowledge-Graph",
-        value='outputs/graphrag',
+        value='outputs/knowledge_graph',
         help="Folder where the Knowledge-Graph pipeline will save related artifacts"
     ))
     if st.button("📚 Build Knowledge-Base"):
@@ -499,27 +526,36 @@ if option == "📚 Build a new Knowledge-Base":
         st.session_state.all_documents = all_documents
         st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
         ## bm -
-        ## graphRAG
+        ## knowledge-graph        
         try:
-            ROOT_DIR = Path(st.session_state.graphrag)
-            INPUT_DIR = ROOT_DIR / "input"
-            OUTPUT_DIR = ROOT_DIR / "output"
-            os.makedirs(ROOT_DIR, exist_ok=True)        
-            os.makedirs(INPUT_DIR, exist_ok=True)
-            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            if "lightrag_engine" not in st.session_state:
+                st.session_state.lightrag_engine = get_lightrag_engine(
+                    working_dir=st.session_state.get("knowledge_graph", "outputs/knowledge_graph"),
+                    api_key=st.session_state.api_key,
+                    embedding_model=st.session_state.get("embedding_model", "text-embedding-3-small"),
+                    embedding_dim=st.session_state.get("dimension", 1536),
+                )
+            rag = st.session_state.lightrag_engine
+            documents_to_ingest = list(all_texts.values())
+            st.write("🕸️ Building Knowledge-Graph...")
+            with st.spinner("🚀 Running indexing pipeline... (extraction, embedding, and graph creation)"):
+                async def build_graph():
+                    # REQUIRED INITIALIZATION
+                    await rag.initialize_storages()
+                    await initialize_pipeline_status()
+                    # INSERT DOCUMENTS (async)
+                    await rag.ainsert(documents_to_ingest)
         
-            for fname, text in all_texts.items():
-                file_path = INPUT_DIR / f"{Path(fname).stem}.txt"
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(text)
-
-            st.write("🕸️ Building Knowledge-Graph...")            
-            with st.spinner("🚀 Running Knowledge-Graph pipeline... (this may take a while depending on your Knowledge-Base size)"):            
-                run_graphrag_cli(ROOT_DIR, INPUT_DIR, OUTPUT_DIR, api_key=st.session_state.api_key)
-            st.success(f"✅ Knowledge-Graph pipeline completed!")
+                # Run the async pipeline in its own event loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(build_graph())
+                loop.close()
+        
+            st.success("✅ Indexing completed! The Knowledge-Graph is ready!")
         except Exception as e:
             st.warning(f"⚠️ Knowledge-Graph build failed: {e}")
-        ## graphRAG -
+        ## knowledge-graph -
 
 elif option == "📤 Load existing Knowledge-Base":
     index_path = st.text_input("🧠 Index file path (.index)", value='outputs/test_index.index')
