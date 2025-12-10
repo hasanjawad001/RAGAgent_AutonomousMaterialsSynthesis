@@ -16,3 +16,4 @@ langchain-openai==0.3.7
 langchain-experimental==0.3.4
 graphrag==2.6.0
 python-docx>=0.8.11
+lightrag-hku[api]==1.4.9.8
