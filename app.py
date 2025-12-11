@@ -45,6 +45,8 @@ from lightrag.kg.shared_storage import initialize_pipeline_status
 import uuid
 import time
 import nest_asyncio
+import concurrent.futures
+import multiprocessing as mp
 
 ################################
 # Globals / Config
@@ -338,6 +340,49 @@ def get_lightrag_engine(working_dir, api_key, embedding_model, embedding_dim):
     )    
     return rag
 
+def call_with_timeout(func, timeout, *args, **kwargs):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            return None
+            
+def run_query_in_process(working_dir, api_key, embedding_model, embedding_dim, query, param, return_dict):
+    """Target function for the multiprocessing Process."""
+    
+    try:
+        rag = get_lightrag_engine(
+            working_dir=working_dir,
+            api_key=api_key,
+            embedding_model=embedding_model,
+            embedding_dim=embedding_dim,
+        )     
+        asyncio.run(rag.initialize_storages())
+        result = rag.query(query, param=param)
+        return_dict["result"] = result
+    except Exception as e:
+        return_dict["error"] = str(e)
+
+def query_with_hard_timeout(working_dir, api_key, embedding_model, embedding_dim, query, param, timeout=30):
+    """Runs rag.query() in a separate process with a hard timeout."""
+    
+    manager = mp.Manager()
+    return_dict = manager.dict()
+    p = mp.Process(
+        target=run_query_in_process,
+        args=(working_dir, api_key, embedding_model, embedding_dim, query, param, return_dict)
+    )
+    p.start()
+    p.join(timeout)  
+    if p.is_alive():
+        p.terminate()   
+        p.join()        
+        return None     
+    if "error" in return_dict:
+        return None ## Exception(return_dict["error"])
+    return return_dict.get("result", None)
+
 class StaticGraphRetriever(BaseRetriever):
     def _get_relevant_documents(self, query, *, run_manager=None):
         return graph_docs
@@ -543,28 +588,16 @@ if option == "📚 Build a new Knowledge-Base":
             
             st.write("🕸️ Building Knowledge-Graph...")
             progress = st.progress(0)
+            ##
             with st.spinner("🚀 Running indexing pipeline... (extraction, embedding, and graph creation)"):
-                
-                async def build_graph():
-                    await rag.initialize_storages()
-                    await initialize_pipeline_status()
-                    # await rag.ainsert(documents_to_ingest, ids=ids_to_ingest)
-                    for i, (doc, doc_id) in enumerate(zip(docs, ids)):
-                        await rag.ainsert([doc], ids=[doc_id])
-                        progress.progress(min((i + 1) / total, 1.0))
-                        await asyncio.sleep(0)   # yield to event loop                    
-                    # await rag.finalize_storages()
-
-                nest_asyncio.apply()                
-                loop_build = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop_build)
-                try:
-                    loop_build.run_until_complete(build_graph())
-                finally:
-                    # loop_build.close()
-                    pass
-
-            st.session_state.lightrag_engine = rag            
+                asyncio.run(rag.initialize_storages())
+                asyncio.run(initialize_pipeline_status())
+                for i, (doc, doc_id) in enumerate(zip(docs, ids)):
+                    rag.insert([doc], ids=[doc_id])
+                    progress.progress(min((i + 1) / total, 1.0))        
+            st.session_state.lightrag_engine = rag     
+            st.session_state.kg_dir = kg_dir
+            ##
             st.success("✅ Indexing completed! The Knowledge-Graph is ready!")
         except Exception as e:
             st.warning(f"⚠️ Knowledge-Graph build failed: {e}")
@@ -647,19 +680,12 @@ elif option == "📤 Load existing Knowledge-Base":
                     embedding_dim=st.session_state.dimension,
                 )                
                 st.write("🕸️ Loading existing Knowledge-Graph...")
+                ##
                 with st.spinner("🚀 Running pipeline..."):
-                    async def load_graph():
-                        await rag.initialize_storages()                        
-                        
-                    nest_asyncio.apply()
-                    loop_load = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop_load)
-                    try:
-                        loop_load.run_until_complete(load_graph())
-                    finally:
-                        # loop_load.close()  
-                        pass
-                st.session_state.lightrag_engine = rag            
+                    asyncio.run(rag.initialize_storages())
+                st.session_state.lightrag_engine = rag  
+                st.session_state.kg_dir = kg_dir                
+                ##
                 st.success("✅ Knowledge-Graph loaded successfully!")
             ## knowledge_graph -
             #
@@ -839,26 +865,15 @@ elif option == "➕ Append existing Knowledge-Base":
         ##
         st.write("🕸️ Appending to existing Knowledge-Graph...")
         progress = st.progress(0)
+        ##
         with st.spinner("🚀 Running pipeline..."):
-            async def append_graph():
-                await rag.initialize_storages()
-                # await rag.ainsert(new_docs, ids=new_ids)
-                for i, (doc, doc_id) in enumerate(zip(docs, ids)):
-                    await rag.ainsert([doc], ids=[doc_id])
-                    progress.progress(min((i + 1) / total, 1.0))
-                    await asyncio.sleep(0)                 
-                # await rag.finalize_storages()
-                
-            nest_asyncio.apply()
-            loop_append = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop_append)
-            try:
-                loop_append.run_until_complete(append_graph())
-            finally:
-                # loop_append.close()     
-                pass
-                        
-        st.session_state.lightrag_engine = rag            
+            asyncio.run(rag.initialize_storages())
+            for i, (doc, doc_id) in enumerate(zip(docs, ids)):
+                rag.insert([doc], ids=[doc_id])
+                progress.progress(min((i + 1) / total, 1.0))            
+        st.session_state.lightrag_engine = rag    
+        st.session_state.kg_dir = kg_dir        
+        ##
         st.success("✅ Successfully appended new documents to the existing Knowledge-Graph!")
         ## knowledge_graph -
         st.success("✅ Append completed! Updated Index/Metadata/Graph have been saved!")            
@@ -1057,53 +1072,28 @@ if "index" in st.session_state:
             graph_context = ""
             if "lightrag_engine" in st.session_state and st.session_state.lightrag_engine is not None:
                 rag = st.session_state.lightrag_engine        
-                async def run_with_timeout(coro, timeout=20):
-                    try:
-                        return await asyncio.wait_for(coro, timeout=timeout)
-                    except asyncio.TimeoutError:
-                        return None
-                        
-                async def query_graph():
-                    global_res = await run_with_timeout(
-                        rag.aquery(query, param=QueryParam(mode="global")),
-                        timeout=50
-                    )                
-                    if global_res and global_res.strip():
-                        return global_res
-                        
-                    # hybrid_res = await run_with_timeout(
-                    #     rag.aquery(query, param=QueryParam(mode="hybrid")),
-                    #     timeout=20
-                    # )
-                    # if hybrid_res and hybrid_res.strip():
-                    #     return hybrid_res
-                
-                    # local_res = await run_with_timeout(
-                    #     rag.aquery(query, param=QueryParam(mode="local")),
-                    #     timeout=10
-                    # )                
-                    # if local_res and local_res.strip():
-                    #     return local_res
-                        
-                    return "No Knowledge-Graph answer found."
-                    
                 try:
-                    nest_asyncio.apply()
-                    loop_q = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop_q)
-                    answer = loop_q.run_until_complete(query_graph())
-                    # loop_q.close()        
-                    if answer:
-                        graph_context = "\n[Knowledge-Graph Context]:\n" + str(answer)
-                        context_meta_chunks.append(graph_context)
-                        original_cmc.append(graph_context)
-                        st.success("✅ Knowledge-Graph context successfully retrieved and added!")
+                    answer = ''
+                    # global_res = rag.query(query, param=QueryParam(mode="global"))   
+                    global_res = query_with_hard_timeout(
+                        working_dir = str(st.session_state.kg_dir),
+                        api_key = st.session_state.api_key,
+                        embedding_model = st.session_state.embedding_model,
+                        embedding_dim = st.session_state.dimension,
+                        query = query, 
+                        param = QueryParam(mode="global"), 
+                        timeout=30
+                    )        
+                    if global_res is None:
+                        answer = "No Knowledge-Graph answer found."        
                     else:
-                        st.info("⚠️ No Knowledge-Graph output for this query!")
-        
+                        answer = str(global_res).strip()
+                    graph_context = "\n[Knowledge-Graph Context]:\n" + str(answer)
+                    context_meta_chunks.append(graph_context)
+                    original_cmc.append(graph_context)
+                    st.success("✅ Knowledge-Graph context successfully retrieved and added!")
                 except Exception as e:
                     st.warning(f"⚠️ Error while querying Knowledge-Graph: {e}")
-        
             else:
                 st.info("ℹ️ No Knowledge-Graph loaded - skipping graph-based retrieval.")            
             ## ==> till now (KB-text-graph) 
