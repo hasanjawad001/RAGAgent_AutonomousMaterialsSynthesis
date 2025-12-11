@@ -541,7 +541,9 @@ if option == "📚 Build a new Knowledge-Base":
                 embedding_model=st.session_state.get("embedding_model", "text-embedding-3-small"),
                 embedding_dim=st.session_state.get("dimension", 1536),
             )
+            # documents_to_ingest = [f"{text}" for text in all_texts.values()]
             documents_to_ingest = [f"{text}" for text in all_texts.values()]
+            ids_to_ingest = [f"{text}" for text in all_texts.keys()]
             # documents_to_ingest = [f"DOC_ID:{uuid.uuid4().hex}\n{text}" for text in all_texts.values()]
 
             
@@ -550,7 +552,7 @@ if option == "📚 Build a new Knowledge-Base":
                 async def build_graph():
                     await rag.initialize_storages()
                     await initialize_pipeline_status()
-                    await rag.ainsert(documents_to_ingest)
+                    await rag.ainsert(documents_to_ingest, ids=ids_to_ingest)
                     # await rag.finalize_storages()
 
                 nest_asyncio.apply()                
@@ -839,13 +841,14 @@ elif option == "➕ Append existing Knowledge-Base":
         )
         
         new_docs = list(all_texts.values())
+        new_ids = list(all_texts.keys())
         # new_docs = [f"DOC_ID:{uuid.uuid4().hex}\n{text}" for text in all_texts.values()]        
         st.write("🕸️ Appending to existing Knowledge-Graph...")
         with st.spinner("🚀 Running pipeline..."):
 
             async def append_graph():
                 await rag.initialize_storages()
-                await rag.ainsert(new_docs)
+                await rag.ainsert(new_docs, ids=new_ids)
                 # await rag.finalize_storages()
                 
             nest_asyncio.apply()
@@ -1056,11 +1059,36 @@ if "index" in st.session_state:
             graph_context = ""
             if "lightrag_engine" in st.session_state and st.session_state.lightrag_engine is not None:
                 rag = st.session_state.lightrag_engine        
+                async def run_with_timeout(coro, timeout=12):
+                    try:
+                        return await asyncio.wait_for(coro, timeout=timeout)
+                    except asyncio.TimeoutError:
+                        return None
+                        
                 async def query_graph():
-                    return await rag.aquery(
-                        query,
-                        param=QueryParam(mode="global")   # same as graphrag global mode
+                    global_res = await run_with_timeout(
+                        rag.aquery(query, param=QueryParam(mode="global")),
+                        timeout=18
+                    )                
+                    if global_res and global_res.strip():
+                        return global_res
+                        
+                    hybrid_res = await run_with_timeout(
+                        rag.aquery(query, param=QueryParam(mode="hybrid")),
+                        timeout=15
                     )
+                    if hybrid_res and hybrid_res.strip():
+                        return hybrid_res
+                
+                    local_res = await run_with_timeout(
+                        rag.aquery(query, param=QueryParam(mode="local")),
+                        timeout=12
+                    )                
+                    if local_res and local_res.strip():
+                        return local_res
+                        
+                    return "No Knowledge-Graph answer found."
+                    
                 try:
                     nest_asyncio.apply()
                     loop_q = asyncio.new_event_loop()
