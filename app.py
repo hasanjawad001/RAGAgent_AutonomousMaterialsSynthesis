@@ -1068,24 +1068,24 @@ if "index" in st.session_state:
                 async def query_graph():
                     global_res = await run_with_timeout(
                         rag.aquery(query, param=QueryParam(mode="global")),
-                        timeout=18
+                        timeout=30
                     )                
                     if global_res and global_res.strip():
                         return global_res
                         
-                    hybrid_res = await run_with_timeout(
-                        rag.aquery(query, param=QueryParam(mode="hybrid")),
-                        timeout=15
-                    )
-                    if hybrid_res and hybrid_res.strip():
-                        return hybrid_res
+                    # hybrid_res = await run_with_timeout(
+                    #     rag.aquery(query, param=QueryParam(mode="hybrid")),
+                    #     timeout=20
+                    # )
+                    # if hybrid_res and hybrid_res.strip():
+                    #     return hybrid_res
                 
-                    local_res = await run_with_timeout(
-                        rag.aquery(query, param=QueryParam(mode="local")),
-                        timeout=12
-                    )                
-                    if local_res and local_res.strip():
-                        return local_res
+                    # local_res = await run_with_timeout(
+                    #     rag.aquery(query, param=QueryParam(mode="local")),
+                    #     timeout=10
+                    # )                
+                    # if local_res and local_res.strip():
+                    #     return local_res
                         
                     return "No Knowledge-Graph answer found."
                     
