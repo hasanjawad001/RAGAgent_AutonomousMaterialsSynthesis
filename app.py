@@ -32,8 +32,8 @@ from langchain_experimental.graph_transformers import LLMGraphTransformer
 import pickle
 import networkx as nx
 from langchain_core.retrievers import BaseRetriever
-from langchain.globals import set_llm_cache
-from langchain_community.cache import SQLiteCache
+# from langchain.globals import set_llm_cache
+# from langchain_community.cache import SQLiteCache
 import json
 import subprocess
 import yaml
@@ -42,13 +42,15 @@ from lightrag.llm.openai import gpt_4o_mini_complete, gpt_4o_complete, openai_em
 from lightrag.utils import EmbeddingFunc
 import asyncio
 from lightrag.kg.shared_storage import initialize_pipeline_status
-
+import uuid
+import time
+import nest_asyncio
 
 ################################
 # Globals / Config
 ################################
 
-set_llm_cache(SQLiteCache(database_path=".cache.db"))
+# set_llm_cache(SQLiteCache(database_path=".cache.db"))
 st.set_page_config(page_title="RAG Agent", layout="centered")
 
 enc = tiktoken.get_encoding("cl100k_base")
@@ -306,7 +308,7 @@ def build_upload_bundle(uploaded_files, client, embedding_model, dimension):
 
     return upload_db, text_meta, images
 
-@st.cache_resource
+# @st.cache_resource
 def get_lightrag_engine(working_dir, api_key, embedding_model, embedding_dim):
     """
     Initializes and caches the LightRAG engine.
@@ -316,27 +318,22 @@ def get_lightrag_engine(working_dir, api_key, embedding_model, embedding_dim):
         
     rag = LightRAG(
         working_dir=working_dir,
-        # LLM Function: Pass the API key to the LLM utility function
         llm_model_func=lambda prompt, system_prompt=None, history_messages=[], **kwargs: gpt_4o_mini_complete(
             prompt, 
             system_prompt=system_prompt, 
             history_messages=history_messages, 
-            api_key=api_key, # <-- API Key passed here
+            api_key=api_key, 
             **kwargs
-        ),
-        
-        # Embedding Function: Pass the API key AND the chosen model name
+        ),        
         embedding_func=EmbeddingFunc(
             embedding_dim=embedding_dim, 
             max_token_size=8192,
-            # Use lambda to inject the user's chosen model and API key
             func=lambda texts: openai_embed(
                 texts, 
                 model=embedding_model, # <-- Chosen model name passed here
                 api_key=api_key         # <-- API Key passed here
             ) 
-        ),
-        
+        ),        
         llm_model_name="gpt-4o-mini",
     )    
     return rag
@@ -415,10 +412,10 @@ if option == "📚 Build a new Knowledge-Base":
         value='outputs/test_metadata.pkl',
         help="Path to save metadata for chunks"
     ))
-    st.session_state.knowledge_graph = dequote_path(st.text_input(
-        "📁 Directory for Knowledge-Graph",
-        value='outputs/knowledge_graph',
-        help="Folder where the Knowledge-Graph pipeline will save related artifacts"
+    st.session_state.knowledge_graph_parent = dequote_path(st.text_input(
+        "📁 Parent directory for Knowledge-Graph",
+        value='outputs',
+        help="Folder where the Knowledge-Graph pipeline will create files/folders and save related artifacts"
     ))
     if st.button("📚 Build Knowledge-Base"):
         if not os.path.isdir(st.session_state.pdf_folder):
@@ -526,32 +523,46 @@ if option == "📚 Build a new Knowledge-Base":
         st.session_state.all_documents = all_documents
         st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)
         ## bm -
-        ## knowledge-graph        
+        ## knowledge-graph       
+        if 'lightrag_engine' in st.session_state:
+            kg_parent_dir = None
+            kg_dir = None
+            rag = None
+            documents_to_ingest = None
+            loop_build = None
+            del st.session_state.lightrag_engine        
         try:
-            if "lightrag_engine" not in st.session_state:
-                st.session_state.lightrag_engine = get_lightrag_engine(
-                    working_dir=st.session_state.get("knowledge_graph", "outputs/knowledge_graph"),
-                    api_key=st.session_state.api_key,
-                    embedding_model=st.session_state.get("embedding_model", "text-embedding-3-small"),
-                    embedding_dim=st.session_state.get("dimension", 1536),
-                )
-            rag = st.session_state.lightrag_engine
-            documents_to_ingest = list(all_texts.values())
+            kg_parent_dir = Path(st.session_state.get("knowledge_graph_parent", "outputs"))
+            kg_dir = kg_parent_dir / "knowledge_graph"
+            kg_dir.mkdir(parents=True, exist_ok=True)                
+            rag = get_lightrag_engine(
+                working_dir=str(kg_dir),
+                api_key=st.session_state.api_key,
+                embedding_model=st.session_state.get("embedding_model", "text-embedding-3-small"),
+                embedding_dim=st.session_state.get("dimension", 1536),
+            )
+            documents_to_ingest = [f"{text}" for text in all_texts.values()]
+            # documents_to_ingest = [f"DOC_ID:{uuid.uuid4().hex}\n{text}" for text in all_texts.values()]
+
+            
             st.write("🕸️ Building Knowledge-Graph...")
             with st.spinner("🚀 Running indexing pipeline... (extraction, embedding, and graph creation)"):
                 async def build_graph():
-                    # REQUIRED INITIALIZATION
                     await rag.initialize_storages()
                     await initialize_pipeline_status()
-                    # INSERT DOCUMENTS (async)
                     await rag.ainsert(documents_to_ingest)
-        
-                # Run the async pipeline in its own event loop
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(build_graph())
-                loop.close()
-        
+                    # await rag.finalize_storages()
+
+                nest_asyncio.apply()                
+                loop_build = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop_build)
+                try:
+                    loop_build.run_until_complete(build_graph())
+                finally:
+                    # loop_build.close()
+                    pass
+
+            st.session_state.lightrag_engine = rag            
             st.success("✅ Indexing completed! The Knowledge-Graph is ready!")
         except Exception as e:
             st.warning(f"⚠️ Knowledge-Graph build failed: {e}")
@@ -560,10 +571,10 @@ if option == "📚 Build a new Knowledge-Base":
 elif option == "📤 Load existing Knowledge-Base":
     index_path = st.text_input("🧠 Index file path (.index)", value='outputs/test_index.index')
     meta_path = st.text_input("📝 Metadata file path (.pkl)", value='outputs/test_metadata.pkl')
-    knowledge_graph = st.text_input(
-        "🕸️ Directory for Knowledge-Graph",
-        value='outputs/knowledge_graph',
-        help="Folder where the Knowledge-Graph pipeline saved related artifacts"
+    knowledge_graph_parent = st.text_input(
+        "🕸️ Parent directory for Knowledge-Graph",
+        value='outputs',
+        help="This folder must contain the 'knowledge_graph' subfolder where previously built Knowledge-Graph stored all graph artifacts."
     )
 
     if st.button("📤 Load Knowledge-Base"):
@@ -610,8 +621,15 @@ elif option == "📤 Load existing Knowledge-Base":
             all_documents = list(docstore._dict.values())
             st.session_state.all_documents = all_documents
             st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)            
-            #
-            kg_dir = Path(knowledge_graph)
+            #            
+            if 'lightrag_engine' in st.session_state:
+                kg_parent_dir = None
+                kg_dir = None
+                rag = None
+                loop_load = None
+                del st.session_state.lightrag_engine                   
+            kg_parent_dir = Path(knowledge_graph_parent)
+            kg_dir = kg_parent_dir / "knowledge_graph"
             required_files = [
                 "graph_chunk_entity_relation.graphml", 
                 "kv_store_doc_status.json", "kv_store_full_entities.json", "kv_store_full_relations.json", 
@@ -623,14 +641,27 @@ elif option == "📤 Load existing Knowledge-Base":
             if missing:
                 st.warning(f"⚠️ Knowledge-Graph is incomplete or corrupted.\nMissing: {missing}")
             else:
-                st.session_state.knowledge_graph = knowledge_graph                
+                rag = get_lightrag_engine(
+                    working_dir=str(kg_dir),
+                    api_key=st.session_state.api_key,
+                    embedding_model=st.session_state.embedding_model,
+                    embedding_dim=st.session_state.dimension,
+                )                
+                st.write("🕸️ Loading existing Knowledge-Graph...")
+                with st.spinner("🚀 Running pipeline..."):
+                    async def load_graph():
+                        await rag.initialize_storages()                        
+                        
+                    nest_asyncio.apply()
+                    loop_load = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop_load)
+                    try:
+                        loop_load.run_until_complete(load_graph())
+                    finally:
+                        # loop_load.close()  
+                        pass
+                st.session_state.lightrag_engine = rag            
                 st.success("✅ Knowledge-Graph loaded successfully!")
-            st.session_state.lightrag_engine = get_lightrag_engine(
-                working_dir=st.session_state.get("knowledge_graph", "outputs/knowledge_graph"),
-                api_key=st.session_state.api_key,
-                embedding_model=st.session_state.embedding_model,
-                embedding_dim=st.session_state.dimension,
-            )
             ##
             ## bm, grpah -
         except Exception as e:
@@ -640,11 +671,11 @@ elif option == "📤 Load existing Knowledge-Base":
 elif option == "➕ Append existing Knowledge-Base":
     exist_index_path = st.text_input("🧠 Existing index file path (.index)", value="outputs/test_index.index")
     exist_meta_path  = st.text_input("📝 Existing metadata file path (.pkl)", value="outputs/test_metadata.pkl")
-    graphrag = dequote_path(st.text_input(
-        "📁 Existing Knowledge-Graph directory",
-        value="outputs/graphrag",
-        help="Folder where the Knowledge-Graph pipeline stores its artifacts"
-    ))
+    exist_knowledge_graph_parent = st.text_input(
+        "🕸️ Existing parent directory for Knowledge-Graph",
+        value='outputs',
+        help="This folder must contain the 'knowledge_graph' subfolder where previously built Knowledge-Graph stored all graph artifacts."
+    )
     append_folder = dequote_path(st.text_input(
         "📁 Input Folder path for NEW PDFs to append:",
         value="inputs/new",
@@ -663,8 +694,8 @@ elif option == "➕ Append existing Knowledge-Base":
             st.error("Existing metadata file not found!"); st.stop()
         if not os.path.isdir(append_folder):
             st.error("Append folder does not exist!"); st.stop()
-        if not os.path.isdir(graphrag):
-            st.error("Knowledge-Graph directory not found!"); st.stop()            
+        if not os.path.isdir(exist_knowledge_graph_parent):
+            st.error("Parent directory for Knowledge-Graph has not been found!"); st.stop()            
         # 1) Collect NEW PDFs
         pdf_files = list(Path(append_folder).glob("*.pdf"))
         if not pdf_files:
@@ -781,25 +812,53 @@ elif option == "➕ Append existing Knowledge-Base":
             st.warning(f"KB wrapper rebuild warning: {e}")
             
         ## graphRAG
-        with st.spinner("🕸️ Updating Knowledge-Graph with new documents..."):
+        if 'lightrag_engine' in st.session_state:
+            kg_parent_dir = None
+            kg_dir = None
+            rag = None
+            new_docs = None
+            loop_append = None            
+            del st.session_state.lightrag_engine               
+        kg_parent_dir = Path(exist_knowledge_graph_parent)
+        kg_dir = kg_parent_dir / "knowledge_graph" 
+        required_files = [
+            "graph_chunk_entity_relation.graphml", 
+            "kv_store_doc_status.json", "kv_store_full_entities.json", "kv_store_full_relations.json", 
+            "kv_store_full_docs.json", "kv_store_text_chunks.json", "kv_store_entity_chunks.json", "kv_store_relation_chunks.json", 
+            "vdb_entities.json", "vdb_relationships.json", "vdb_chunks.json",
+        ]
+        missing = [f for f in required_files if not (kg_dir / f).exists()]
+        if missing:
+            st.error(f"❌ Cannot append. Knowledge-Graph is incomplete.\nMissing: {missing}")
+            st.stop()
+        rag = get_lightrag_engine(
+            working_dir=str(kg_dir),
+            api_key=st.session_state.api_key,
+            embedding_model=st.session_state.embedding_model,
+            embedding_dim=st.session_state.dimension,
+        )
+        
+        new_docs = list(all_texts.values())
+        # new_docs = [f"DOC_ID:{uuid.uuid4().hex}\n{text}" for text in all_texts.values()]        
+        st.write("🕸️ Appending to existing Knowledge-Graph...")
+        with st.spinner("🚀 Running pipeline..."):
+
+            async def append_graph():
+                await rag.initialize_storages()
+                await rag.ainsert(new_docs)
+                # await rag.finalize_storages()
+                
+            nest_asyncio.apply()
+            loop_append = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop_append)
             try:
-                ROOT_DIR = Path(graphrag)
-                INPUT_DIR = ROOT_DIR / "input"
-                OUTPUT_DIR = ROOT_DIR / "output"
-                os.makedirs(ROOT_DIR, exist_ok=True)            
-                os.makedirs(INPUT_DIR, exist_ok=True)
-                os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-                for fname, text in all_texts.items():
-                    file_path = INPUT_DIR / f"{Path(fname).stem}_append.txt"
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(text)
-    
-                run_graphrag_cli(ROOT_DIR, INPUT_DIR, OUTPUT_DIR, api_key=st.session_state.api_key)
-                st.session_state.graphrag  = graphrag          
-                st.success("✅ Knowledge-Graph updated successfully!")
-            except Exception as e:
-                st.warning(f"⚠️ Knowledge-Graph update failed: {e}")
+                loop_append.run_until_complete(append_graph())
+            finally:
+                # loop_append.close()     
+                pass
+                        
+        st.session_state.lightrag_engine = rag            
+        st.success("✅ Successfully appended new documents to the existing Knowledge-Graph!")
         ## graphRAG -
         st.success("✅ Append completed! Updated Index/Metadata/Graph have been saved!")            
 
