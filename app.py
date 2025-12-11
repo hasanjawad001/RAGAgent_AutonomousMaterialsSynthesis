@@ -311,7 +311,7 @@ def build_upload_bundle(uploaded_files, client, embedding_model, dimension):
 # @st.cache_resource
 def get_lightrag_engine(working_dir, api_key, embedding_model, embedding_dim):
     """
-    Initializes and caches the LightRAG engine.
+    Initializes the LightRAG engine.
     """
     if not os.path.exists(working_dir):
         os.makedirs(working_dir)
@@ -330,8 +330,8 @@ def get_lightrag_engine(working_dir, api_key, embedding_model, embedding_dim):
             max_token_size=8192,
             func=lambda texts: openai_embed(
                 texts, 
-                model=embedding_model, # <-- Chosen model name passed here
-                api_key=api_key         # <-- API Key passed here
+                model=embedding_model, 
+                api_key=api_key        
             ) 
         ),        
         llm_model_name="gpt-4o-mini",
@@ -415,7 +415,7 @@ if option == "📚 Build a new Knowledge-Base":
     st.session_state.knowledge_graph_parent = dequote_path(st.text_input(
         "📁 Parent directory for Knowledge-Graph",
         value='outputs',
-        help="Folder where the Knowledge-Graph pipeline will create files/folders and save related artifacts"
+        help="This is where the Knowledge-Graph pipeline will create 'knowledge_graph' subfolder and save related artifacts"
     ))
     if st.button("📚 Build Knowledge-Base"):
         if not os.path.isdir(st.session_state.pdf_folder):
@@ -525,11 +525,7 @@ if option == "📚 Build a new Knowledge-Base":
         ## bm -
         ## knowledge-graph       
         if 'lightrag_engine' in st.session_state:
-            kg_parent_dir = None
-            kg_dir = None
-            rag = None
-            documents_to_ingest = None
-            loop_build = None
+            kg_parent_dir, kg_dir, rag, documents_to_ingest, loop_build = None, None, None, None, None
             del st.session_state.lightrag_engine        
         try:
             kg_parent_dir = Path(st.session_state.get("knowledge_graph_parent", "outputs"))
@@ -541,18 +537,22 @@ if option == "📚 Build a new Knowledge-Base":
                 embedding_model=st.session_state.get("embedding_model", "text-embedding-3-small"),
                 embedding_dim=st.session_state.get("dimension", 1536),
             )
-            # documents_to_ingest = [f"{text}" for text in all_texts.values()]
-            documents_to_ingest = [f"{text}" for text in all_texts.values()]
-            ids_to_ingest = [f"{text}" for text in all_texts.keys()]
-            # documents_to_ingest = [f"DOC_ID:{uuid.uuid4().hex}\n{text}" for text in all_texts.values()]
-
+            docs = list(all_texts.values()) 
+            ids = list(all_texts.keys())
+            total = len(docs)
             
             st.write("🕸️ Building Knowledge-Graph...")
+            progress = st.progress(0)
             with st.spinner("🚀 Running indexing pipeline... (extraction, embedding, and graph creation)"):
+                
                 async def build_graph():
                     await rag.initialize_storages()
                     await initialize_pipeline_status()
-                    await rag.ainsert(documents_to_ingest, ids=ids_to_ingest)
+                    # await rag.ainsert(documents_to_ingest, ids=ids_to_ingest)
+                    for i, (doc, doc_id) in enumerate(zip(docs, ids)):
+                        await rag.ainsert([doc], ids=[doc_id])
+                        progress.progress(min((i + 1) / total, 1.0))
+                        await asyncio.sleep(0)   # yield to event loop                    
                     # await rag.finalize_storages()
 
                 nest_asyncio.apply()                
@@ -623,12 +623,10 @@ elif option == "📤 Load existing Knowledge-Base":
             all_documents = list(docstore._dict.values())
             st.session_state.all_documents = all_documents
             st.session_state.bm25 = BM25Retriever.from_documents(all_documents, k=top_k_textKBbm)            
-            #            
+            
+            ## knowledge_graph             
             if 'lightrag_engine' in st.session_state:
-                kg_parent_dir = None
-                kg_dir = None
-                rag = None
-                loop_load = None
+                kg_parent_dir, kg_dir, rag, loop_load = None, None, None, None
                 del st.session_state.lightrag_engine                   
             kg_parent_dir = Path(knowledge_graph_parent)
             kg_dir = kg_parent_dir / "knowledge_graph"
@@ -639,7 +637,6 @@ elif option == "📤 Load existing Knowledge-Base":
                 "vdb_entities.json", "vdb_relationships.json", "vdb_chunks.json",
             ]
             missing = [f for f in required_files if not (kg_dir / f).exists()]
-            
             if missing:
                 st.warning(f"⚠️ Knowledge-Graph is incomplete or corrupted.\nMissing: {missing}")
             else:
@@ -664,7 +661,8 @@ elif option == "📤 Load existing Knowledge-Base":
                         pass
                 st.session_state.lightrag_engine = rag            
                 st.success("✅ Knowledge-Graph loaded successfully!")
-            ##
+            ## knowledge_graph -
+            #
             ## bm, grpah -
         except Exception as e:
             st.error(f"❌ Failed to load Knowledge-Base: {e}")
@@ -813,13 +811,9 @@ elif option == "➕ Append existing Knowledge-Base":
         except Exception as e:
             st.warning(f"KB wrapper rebuild warning: {e}")
             
-        ## graphRAG
+        ## knowledge_graph
         if 'lightrag_engine' in st.session_state:
-            kg_parent_dir = None
-            kg_dir = None
-            rag = None
-            new_docs = None
-            loop_append = None            
+            kg_parent_dir, kg_dir, rag, new_docs, loop_append = None, None, None, None, None            
             del st.session_state.lightrag_engine               
         kg_parent_dir = Path(exist_knowledge_graph_parent)
         kg_dir = kg_parent_dir / "knowledge_graph" 
@@ -839,16 +833,20 @@ elif option == "➕ Append existing Knowledge-Base":
             embedding_model=st.session_state.embedding_model,
             embedding_dim=st.session_state.dimension,
         )
-        
-        new_docs = list(all_texts.values())
-        new_ids = list(all_texts.keys())
-        # new_docs = [f"DOC_ID:{uuid.uuid4().hex}\n{text}" for text in all_texts.values()]        
+        docs = list(all_texts.values())
+        ids = list(all_texts.keys())
+        total = len(docs)
+        ##
         st.write("🕸️ Appending to existing Knowledge-Graph...")
+        progress = st.progress(0)
         with st.spinner("🚀 Running pipeline..."):
-
             async def append_graph():
                 await rag.initialize_storages()
-                await rag.ainsert(new_docs, ids=new_ids)
+                # await rag.ainsert(new_docs, ids=new_ids)
+                for i, (doc, doc_id) in enumerate(zip(docs, ids)):
+                    await rag.ainsert([doc], ids=[doc_id])
+                    progress.progress(min((i + 1) / total, 1.0))
+                    await asyncio.sleep(0)                 
                 # await rag.finalize_storages()
                 
             nest_asyncio.apply()
@@ -862,7 +860,7 @@ elif option == "➕ Append existing Knowledge-Base":
                         
         st.session_state.lightrag_engine = rag            
         st.success("✅ Successfully appended new documents to the existing Knowledge-Graph!")
-        ## graphRAG -
+        ## knowledge_graph -
         st.success("✅ Append completed! Updated Index/Metadata/Graph have been saved!")            
 
 st.divider()
@@ -1059,7 +1057,7 @@ if "index" in st.session_state:
             graph_context = ""
             if "lightrag_engine" in st.session_state and st.session_state.lightrag_engine is not None:
                 rag = st.session_state.lightrag_engine        
-                async def run_with_timeout(coro, timeout=12):
+                async def run_with_timeout(coro, timeout=20):
                     try:
                         return await asyncio.wait_for(coro, timeout=timeout)
                     except asyncio.TimeoutError:
