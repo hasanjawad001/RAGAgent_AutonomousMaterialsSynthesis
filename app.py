@@ -1052,43 +1052,34 @@ if "index" in st.session_state:
             ## ==> till now (upload-image)
             ##
         ##
-        with st.spinner("Knowledge-Graph: Retrieving entities, relationships, and summaries..."):        
-            graph_context_chunks = []
+        with st.spinner("Knowledge-Graph: Retrieving entities, relationships, and summaries..."):  
             graph_context = ""
-            original_gc = ""
-            if "graphrag" in st.session_state and os.path.isdir(st.session_state.graphrag):
-                try:
-                    ROOT_DIR = Path(st.session_state.graphrag)
-                    result = subprocess.run(
-                        [
-                            "graphrag", "query",
-                            "--root", str(ROOT_DIR),
-                            "--method", "global",
-                            "--query", query
-                        ],
-                        capture_output=True,
-                        text=True
+            if "lightrag_engine" in st.session_state and st.session_state.lightrag_engine is not None:
+                rag = st.session_state.lightrag_engine        
+                async def query_graph():
+                    return await rag.aquery(
+                        query,
+                        param=QueryParam(mode="global")   # same as graphrag global mode
                     )
-                    if result.returncode !=0:
-                        raise Exception(f"⚠️ Knowledge-Graph query failed:\n{result.stderr.strip()}")
-                    answer = result.stdout.strip()
+                try:
+                    nest_asyncio.apply()
+                    loop_q = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop_q)
+                    answer = loop_q.run_until_complete(query_graph())
+                    # loop_q.close()        
                     if answer:
-                        # graph_context = (
-                        #     "\n[GraphRAG Context]:\n" +
-                        #     textwrap.shorten(answer, width=6000, placeholder=" ...")
-                        # )
-                        graph_context = (
-                            "\n[Knowledge-Graph Context]:\n" + answer
-                        )                        
+                        graph_context = "\n[Knowledge-Graph Context]:\n" + str(answer)
                         context_meta_chunks.append(graph_context)
                         original_cmc.append(graph_context)
                         st.success("✅ Knowledge-Graph context successfully retrieved and added!")
                     else:
-                        st.info(f"⚠️ No Knowledge-Graph response found for this query!")
+                        st.info("⚠️ No Knowledge-Graph output for this query!")
+        
                 except Exception as e:
-                    st.warning(f"⚠️ Error while retrieving from Knowledge-Graph: {e}")
+                    st.warning(f"⚠️ Error while querying Knowledge-Graph: {e}")
+        
             else:
-                st.info("ℹ️ No Knowledge-Graph directory loaded - skipping graph-based retrieval.")
+                st.info("ℹ️ No Knowledge-Graph loaded - skipping graph-based retrieval.")            
             ## ==> till now (KB-text-graph) 
         ##
         context_meta = "\n\n".join(context_meta_chunks)
