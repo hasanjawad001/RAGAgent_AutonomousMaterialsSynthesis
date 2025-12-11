@@ -1066,7 +1066,7 @@ if "index" in st.session_state:
                 async def query_graph():
                     global_res = await run_with_timeout(
                         rag.aquery(query, param=QueryParam(mode="global")),
-                        timeout=30
+                        timeout=50
                     )                
                     if global_res and global_res.strip():
                         return global_res
